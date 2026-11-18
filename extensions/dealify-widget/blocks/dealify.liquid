@@ -1,0 +1,51 @@
+{% if request.page_type == 'product' %}
+  {% capture dealify_strings %}
+{
+  "binding": {{ 'dealify.binding' | t | json }},
+  "recover": {{ 'dealify.recover' | t | json }},
+  "open": {{ 'dealify.open' | t | json }},
+  "title": {{ 'dealify.title' | t | json }},
+  "close": {{ 'dealify.close' | t | json }},
+  "variant": {{ 'dealify.variant' | t | json }},
+  "quantity": {{ 'dealify.quantity' | t | json }},
+  "message": {{ 'dealify.message' | t | json }},
+  "send": {{ 'dealify.send' | t | json }},
+  "delete": {{ 'dealify.delete' | t | json }},
+  "unavailable": {{ 'dealify.unavailable' | t | json }},
+  "currency": {{ 'dealify.currency' | t | json }},
+  "ineligible": {{ 'dealify.ineligible' | t | json }},
+  "terms": {{ 'dealify.terms' | t | json }},
+  "expires": {{ 'dealify.expires' | t | json }},
+  "list_price": {{ 'dealify.list_price' | t | json }},
+  "accept": {{ 'dealify.accept' | t | json }},
+  "checkout": {{ 'dealify.checkout' | t | json }},
+  "deleted": {{ 'dealify.deleted' | t | json }},
+  "pending_owner": {{ 'dealify.pending_owner' | t | json }},
+  "paused": {{ 'dealify.paused' | t | json }},
+  "expired": {{ 'dealify.expired' | t | json }},
+  "superseded": {{ 'dealify.superseded' | t | json }},
+  "declined": {{ 'dealify.declined' | t | json }},
+  "accepted": {{ 'dealify.accepted' | t | json }}
+}
+  {% endcapture %}
+  <dealify-shopkeeper
+    data-proxy="{{ block.settings.proxy_path | escape }}"
+    data-handle="{{ product.handle | escape }}"
+    data-shop="{{ shop.permanent_domain | escape }}"
+    data-currency="{{ cart.currency.iso_code | escape }}"
+    data-strings="{{ dealify_strings | escape }}"
+    data-stylesheet="{{ 'dealify-widget.css' | asset_url }}"
+    {{ block.shopify_attributes }}
+  ></dealify-shopkeeper>
+{% endif %}
+
+{% schema %}
+{
+  "name": "t:dealify.name",
+  "target": "body",
+  "javascript": "dealify-widget.js",
+  "settings": [
+    { "type": "text", "id": "proxy_path", "label": "t:dealify.proxy", "info": "t:dealify.proxy_info", "default": "/apps/dealify" }
+  ]
+}
+{% endschema %}

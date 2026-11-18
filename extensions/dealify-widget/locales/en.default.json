@@ -1,0 +1,29 @@
+{
+  "dealify": {
+    "open": "Make an offer",
+    "title": "Dealify shopkeeper",
+    "close": "Close",
+    "variant": "Product option",
+    "quantity": "Quantity",
+    "message": "Your offer or question",
+    "send": "Send",
+    "delete": "Delete this conversation",
+    "unavailable": "Offers are unavailable right now. Please try again shortly.",
+    "currency": "Offers are available only in CAD. You can shop at the listed prices.",
+    "ineligible": "This product is not open to offers right now.",
+    "terms": "Tax and shipping are extra. Checkout includes only the items and quantities shown here. Changing the basket removes the discount.",
+    "expires": "Discount expires",
+    "list_price": "At listed price. Shopify Checkout shows current prices; no price hold applies.",
+    "accept": "Accept offer",
+    "checkout": "Continue to Shopify Checkout",
+    "deleted": "Conversation deleted. Close and reopen to start again.",
+    "pending_owner": "Waiting for the shop\u2019s approval\u2026",
+    "paused": "The shop has paused offers.",
+    "expired": "This offer has expired. Please request a fresh offer.",
+    "superseded": "A newer offer has replaced this one.",
+    "declined": "This offer is no longer available. Please request a fresh offer.",
+    "accepted": "This offer has been accepted.",
+    "binding": "Only this card is binding; chat text is not.",
+    "recover": "Recover checkout link"
+  }
+}

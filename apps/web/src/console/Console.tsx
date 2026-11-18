@@ -7,7 +7,7 @@ import { Feed, money } from "./Feed";
 import { Race } from "./Race";
 import { KeptBand } from "./KeptBand";
 import { RedTeamSummary } from "./RedTeamSummary";
-export function Console({ port, onSignOut }: { port: ConsolePort; onSignOut?: () => void }) {
+export function Console({ port, onSignOut, shopName = "Trailhead Co." }: { port: ConsolePort; onSignOut?: () => void; shopName?: string }) {
   const policyRevision = useRef(0);
   const [state, setState] = useState<ConsoleState>();
   const [attempt, setAttempt] = useState(0);
@@ -96,7 +96,7 @@ export function Console({ port, onSignOut }: { port: ConsolePort; onSignOut?: ()
   }
   return <>
     <header className="topbar">
-      <div className="brand"><span className="sticker" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 21V3M5 6h12l3 3-3 3H5zM4 16h11" /></svg></span><h1>Trailhead Co.</h1><span className="console-label">Owner Console</span>{state.catalog && <span className={`catalog-source ${state.catalog.source === "shopify-admin" ? "" : "fallback"}`} role="status">{state.catalog.source === "shopify-admin" ? `Live from Shopify · ${state.products.length} products` : `Seed fallback · ${state.catalog.warnings[0] ?? "Shopify is unreachable"}`}</span>}</div>
+      <div className="brand"><span className="sticker" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 21V3M5 6h12l3 3-3 3H5zM4 16h11" /></svg></span><h1>{shopName}</h1><span className="console-label">Owner Console</span>{state.catalog && <span className={`catalog-source ${state.catalog.source === "shopify-admin" ? "" : "fallback"}`} role="status">{state.catalog.source === "shopify-admin" ? `Live from Shopify · ${state.products.length} products` : `Catalog unavailable · ${state.catalog.warnings[0] ?? "Shopify is unreachable"}`}</span>}</div>
       <div className="top-actions">{onSignOut && <button className="sign-out" onClick={onSignOut}>Sign out</button>}<span className={`status-pill ${state.policy.paused ? "paused" : ""}`} role="status">{state.policy.paused ? "Paused" : "Deals live"}</span>
         <button className="pause-button" disabled={busy} onClick={() => void togglePause()}>{state.policy.paused ? "Resume" : "PAUSE"}</button></div>
     </header>

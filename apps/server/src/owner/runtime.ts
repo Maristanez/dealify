@@ -32,6 +32,8 @@ export type OwnerRuntime = {
   pendingApprovals(): Approval[];
   requestApproval(input: ApprovalRequest): Approval;
   resolveApproval(id: string, decision: "approve" | "decline"): Promise<Approval>;
+  forgetShopper(shopperId: string): void;
+  snapshot(): OwnerRuntimeSnapshot;
   dispose(): void;
 };
 
@@ -39,6 +41,12 @@ type ApprovalRecord = {
   approval: Approval;
   shopperId: string;
   surface: ConsoleEvent["surface"];
+};
+export type OwnerRuntimeSnapshot = {
+  approvals: Array<[string, ApprovalRecord]>;
+  askedNegotiations: string[];
+  feed: PublishedConsoleEvent[];
+  nextEventId: number;
 };
 
 function assertPolicy(policy: Policy): void {
@@ -79,6 +87,7 @@ export async function createOwnerRuntime(options: {
   onApprovalResolved?: (approval: Approval) => void | Promise<void>;
   onPaused?: () => void;
   redteam?: RedTeamResult;
+  snapshot?: OwnerRuntimeSnapshot;
 }): Promise<OwnerRuntime> {
   let policy: Policy = { ...await options.db.loadLatestPolicy() };
   assertPolicy(policy);
@@ -89,15 +98,21 @@ export async function createOwnerRuntime(options: {
   let mutationTail: Promise<void> = Promise.resolve();
   let pauseGeneration = 0;
   let pausePersistence: PausePersistence = "saved";
-  let nextEventId = 1;
-  const feed: PublishedConsoleEvent[] = [];
+  let nextEventId = options.snapshot?.nextEventId ?? 1;
+  const feed: PublishedConsoleEvent[] = clone(options.snapshot?.feed ?? []);
   const listeners = new Set<(entry: PublishedConsoleEvent) => void>();
-  const approvals = new Map<string, ApprovalRecord>();
-  const askedNegotiations = new Set<string>();
+  const approvals = new Map<string, ApprovalRecord>(clone(options.snapshot?.approvals ?? []));
+  const askedNegotiations = new Set<string>(options.snapshot?.askedNegotiations ?? []);
   const approvalTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pauseRetryTimers = new Set<ReturnType<typeof setTimeout>>();
   const now = options.now ?? (() => new Date());
   const redteam = clone(options.redteam ?? emptyRedTeamResult());
+  for (const [id, record] of approvals) {
+    if (record.approval.status !== "requested") continue;
+    approvalTimers.set(id, setTimeout(() => {
+      void resolveTerminal(id, "timed_out").catch(() => undefined);
+    }, Math.max(0, Date.parse(record.approval.deadline) - now().getTime())));
+  }
 
   function publish(event: ConsoleEvent): PublishedConsoleEvent {
     const entry = { id: nextEventId, event: clone(event) };
@@ -301,7 +316,22 @@ export async function createOwnerRuntime(options: {
       if (decision !== "approve" && decision !== "decline") {
         return Promise.reject(new TypeError("Approval decision must be approve or decline"));
       }
+      const approval = approvals.get(id)?.approval;
+      if (approval?.status === "requested" && now().getTime() >= Date.parse(approval.deadline)) {
+        return resolveTerminal(id, "timed_out").then(() => { throw new Error("That approval has expired"); });
+      }
       return resolveTerminal(id, decision === "approve" ? "approved" : "declined");
+    },
+    snapshot: () => clone({ approvals: [...approvals], askedNegotiations: [...askedNegotiations], feed, nextEventId }),
+    forgetShopper: shopperId => {
+      for (const [id, record] of approvals) {
+        if (record.shopperId !== shopperId) continue;
+        clearTimeout(approvalTimers.get(id));
+        approvalTimers.delete(id);
+        askedNegotiations.delete(record.approval.negotiationId);
+        approvals.delete(id);
+      }
+      for (let index = feed.length - 1; index >= 0; index--) if (feed[index]?.event.shopperId === shopperId) feed.splice(index, 1);
     },
     dispose: () => {
       for (const timer of approvalTimers.values()) clearTimeout(timer);

@@ -321,3 +321,26 @@
 **Verification:** 371 tests / 42 files passed at the full-suite checkpoint, including 25 new API transcript regressions; workspace typecheck and production web build passed. Separate standards/spec review findings were addressed. A local browser preview using real Shopify and Backboard confirmed that a fresh shopper had no seeded size/race memory and that a typed size reached the correct variant. The visual replay found and led to fixes for fractional-bid display and size persistence on follow-ups.
 
 **Boundary:** Existing dirty work was preserved while another process advanced HEAD. The hosted Console remained behind sign-in; production publishing, Shopify copy/branding, and shipping/tax verification remain open in PLAN. No paid order or production policy change was made by this follow-up.
+
+### #19 · 2026-11-17 · Codex · Public Shopify app foundation
+
+**Request:** Turn Dealify into a free public-app pilot and research Shopify approval requirements; publish progress in a PR.
+
+**Changes:** Added a separate Express entry point using Shopify's official token exchange and expiring offline sessions, encrypted SQLite persistence, per-shop runtimes and pricing policies, signed storefront sessions, privacy/uninstall verification, embedded App Bridge Console integration, and complete catalog pagination. New stores start paused. Public negotiated checkout remains closed while its Shopify Function is being implemented. Recorded primary-source approval and Backboard privacy research.
+
+**Evidence:** 604 tests across 58 files, workspace typechecks, and production Console build pass at the foundation checkpoint. Shopify configuration validates. New HTTP tests cover identity, shop isolation, persistence, HMAC rejection, proxy sessions, embedding, and catalog pagination.
+
+**Open gates:** Exact-basket checkout, durable negotiations, paid/refund reconciliation, external AI deletion, merchant privacy/support details, extension implementation, operations, development-store testing, listing and Shopify review. This is a draft foundation, not a launch-ready app or approval claim.
+
+**Foundation review follow-up:** Independent standards/spec reviews found shopper deletion clearing other sessions, concurrent token rotation, and replayed/delayed uninstall events disrupting reinstalls. Added targeted shopper erasure, coordinated Shopify credential/lifecycle operations, webhook receipts and installation-age checks. All 608 tests pass; server typecheck passes. The embedded-UI validator was attempted but its bundled TypeScript/type-index dependencies are incomplete; local TypeScript/build checks pass, and live embedding still needs verification.
+
+
+## 2026-11-18 — Public checkout and theme embed checkpoint
+
+**Changes:** Added a Rust Discount Function enforcing the exact CAD basket, durable single-use checkout intents with recovery after unknown Shopify outcomes, queued deactivation retry after post-mint policy invalidation, persistent negotiations/approvals, and a product-page app embed using the signed proxy. The embed is lazy, scopes its styles, renders dynamic replies as text, requires explicit acceptance and provides session deletion. Pilot restrictions exclude unsupported currencies, gift cards, required subscriptions and component bundles.
+
+**Evidence:** 618 tests in 60 files pass; all workspace TypeScript projects and the Console production build pass. Twelve compiled WASM fixtures passed earlier in this checkpoint. Catalog queries validate against 2026-10; app configuration and Liquid app embed validate. The bundled theme validator lacked dependencies; installing them in task scratch space allowed the second attempt to pass. The pnpm recursive typecheck wrapper tried to reinstall its pinned version outside the workspace; equivalent direct TypeScript commands passed instead.
+
+**Remaining:** Live installation/theme/payment, targeted acceptance refresh, paid-order/refund reconciliation, retention and complete privacy deletion/export, provider lifecycle, production operations, real support email and final listing/review. Native Rust tests cannot execute on this host; compiled Shopify WASM tests are the execution evidence. The user reports Railway unavailable, which is treated as a deployment blocker, not a verified provider-wide outage. This remains a draft PR.
+
+**Checkpoint review fixes:** Standards review found two issues (cold-start session deletion and missing binding disclosure); spec review found two (uncertain mint invalidation and lost checkout-link recovery). All four are fixed with public-boundary regressions. Current suite: 622 tests / 60 files; affected typechecks and Liquid validation pass. Revocation mutation validates against 2026-10. A browser fixture was inspected at 390×844; this is local visual evidence, not a live theme or paid-checkout test.

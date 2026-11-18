@@ -21,3 +21,8 @@ graphify-out/cost.json
 # design walkthrough output and its throwaway Playwright install
 scripts/chat-walkthrough/shots/
 scripts/chat-walkthrough/package*.json
+
+# Shopify development and local data
+.shopify/
+**/target/
+*.sqlite*

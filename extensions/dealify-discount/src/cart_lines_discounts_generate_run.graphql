@@ -1,0 +1,19 @@
+query Input {
+  cart {
+    lines {
+      id
+      quantity
+      merchandise { __typename ... on ProductVariant { id } }
+      sellingPlanAllocation { sellingPlan { id } }
+      parentRelationship { parent { id } }
+      cost {
+        amountPerQuantity { amount currencyCode }
+        subtotalAmount { amount currencyCode }
+      }
+    }
+  }
+  discount {
+    discountClasses
+    metafield(namespace: "$app", key: "offer") { jsonValue }
+  }
+}
