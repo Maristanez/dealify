@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim AS build
 RUN npm install --global pnpm@10.19.0 --ignore-scripts
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig*.json ./
 COPY packages ./packages
 COPY apps/server ./apps/server
 COPY apps/web ./apps/web

@@ -377,3 +377,5 @@
 **Limits:** No production mutation or launch claim. Provider/hosting terms, support email, configuration migration, persistence/backup/restore/deletion replay, continuous alerts and live Shopify gates remain open.
 
 **Operations review:** Standards found no actionable violations. Spec found unpublished usage quotas; the support page now reads the same limits as enforcement, including configured daily totals and reset-window semantics. An HTTP regression failed before the disclosure and passes after it.
+
+**Container follow-up:** GitHub's application job passed tests, all workspace typechecks and build. The isolated Docker build exposed a missing root `tsconfig.pure.json`; the build context now includes the complete root TypeScript configuration chain. Re-running CI verifies the fix.
