@@ -369,7 +369,9 @@ const server = createServer(async (request, response) => {
       // Asking how low the price goes is not a new offer: the card on the table is restated and the round stands.
       const accepting = isTextAcceptance(message);
       const standing = isPriceMoveQuestion(message) || accepting ? await withShopperLock(requireShopperId(payload), () => standingOfferReply(payload)) : null;
-      if (standing && accepting && standing.card.status === "live") standing.reply = "Tap Deal on this card to continue to Shopify Checkout. Your held price and timer stay the same.";
+      if (standing && accepting && standing.card.status === "live") standing.reply = standing.card.option.total < standing.card.option.listTotal
+        ? "Use the accept button on this card to get your Shopify checkout link. The card's discount and expiry stay the same."
+        : "Use the accept button on this card to get your Shopify checkout link. Checkout shows current listed prices; no price hold applies.";
       if (standing) { sendJson(response, request, 200, standing); return; }
       if (isOfferIntent(message)) {
         sendJson(response, request, 200, await makeOfferFromPayload(payload, message));
@@ -428,8 +430,8 @@ const server = createServer(async (request, response) => {
       const payload = await readJson(request);
       const settlement = await withShopperLock(requireShopperId(payload), () => acceptOffer(String(payload.offerId || "").trim(), payload));
       const reply = settlement.code
-        ? `Deal. Use ${settlement.code} at checkout — I opened it with the code already applied.`
-        : "Deal. I opened Shopify Checkout with the accepted items.";
+        ? `Deal. Your Shopify checkout link is ready with code ${settlement.code} applied. Payment is not confirmed.`
+        : "Deal. Your Shopify checkout link is ready with the selected items. Checkout shows current listed prices; no price hold applies.";
       sendJson(response, request, 200, { settlement, reply });
     } catch (error) {
       console.error("[api/accept]", error);
@@ -670,6 +672,39 @@ const VARIANTS_QUERY = `#graphql
     }
   }
 `;
+
+const OFFER_VARIANTS_QUERY = `#graphql
+  query DealifyOfferVariants($ids: [ID!]!) {
+    shop { currencyCode }
+    nodes(ids: $ids) {
+      __typename
+      ... on ProductVariant {
+        id title sku price inventoryQuantity requiresComponents
+        inventoryItem { unitCost { amount currencyCode } }
+        product {
+          id title handle productType status isGiftCard requiresSellingPlan
+          metafield(namespace: "bazaar", key: "stocked_at") { value }
+        }
+      }
+    }
+  }
+`;
+
+async function refreshOfferItems(offer) {
+  const ids = [...new Set(offer.items.map(item => item.variantId))];
+  if (!ids.length || ids.length > 250) throw new Error("Invalid offer basket");
+  const data = await shopifyGraphql(OFFER_VARIANTS_QUERY, { ids });
+  if (data.shop?.currencyCode !== "CAD" || !Array.isArray(data.nodes)) throw new Error("Could not verify this basket");
+  const variants = new Map(data.nodes.filter(node => node?.__typename === "ProductVariant").map(node => [node.id, node]));
+  return { items: offer.items.flatMap(item => {
+    const variant = variants.get(item.variantId);
+    if (!variant || variant.product?.status !== "ACTIVE") return [];
+    const product = mapShopifyProduct({ ...variant.product, variants: { nodes: [variant] } });
+    const current = product.variants[0];
+    return [{ ...item, title: product.title, list: current.price, cost: current.unitCost,
+      stockedAt: product.stockedAt, inventory: current.inventory, inStock: current.inStock }];
+  }) };
+}
 
 function mapShopifyProduct(product) {
   if (!product) return null;
@@ -1157,7 +1192,7 @@ async function acceptOffer(offerId, payload) {
   let mirror;
   let deadline;
   try {
-    mirror = await Promise.race([syncMirror({ force: true }), new Promise((_, reject) => {
+    mirror = await Promise.race([env.PUBLIC_APP === "true" ? refreshOfferItems(offer) : syncMirror({ force: true }), new Promise((_, reject) => {
       deadline = setTimeout(() => reject(new Error("Shopify refresh timed out")), 1500);
     })]);
   } catch {

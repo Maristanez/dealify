@@ -379,3 +379,12 @@
 **Operations review:** Standards found no actionable violations. Spec found unpublished usage quotas; the support page now reads the same limits as enforcement, including configured daily totals and reset-window semantics. An HTTP regression failed before the disclosure and passes after it.
 
 **Container follow-up:** GitHub's application job passed tests, all workspace typechecks and build. The isolated Docker build exposed a missing root `tsconfig.pure.json`; the build context now includes the complete root TypeScript configuration chain. Re-running CI verifies the fix.
+
+
+## 2026-11-18 — Targeted acceptance refresh
+
+**Changes:** Public acceptance fetches only the agreed variants in one Admin GraphQL request, checking current status, CAD, costs, stock and unsupported configurations before the existing engine audit. Public mode still refuses stale fallback. Checkout replies now describe a ready link and make no full-price hold claim.
+
+**Evidence:** 650 tests / 60 files and server TypeScript check pass. The acceptance regression failed with an unavailable full catalog before the targeted refresh and passes afterward; seven changed-data cases refuse minting. The new query validates against 2026-10 (read_products/read_inventory). A local scratch validator lacked schema assets; the original bundled validator passed. Separate standards/spec reviews found no actionable issues. Updated the existing text-acceptance regression to check the corrected button and no-hold wording.
+
+**Deployment verification:** GitHub run 44248127150 passed application tests, complete workspace typecheck/build, Docker build, HTTP readiness/auth/public-page smoke checks and graceful container exit. Actual Railway rollout and live Shopify acceptance remain unverified.

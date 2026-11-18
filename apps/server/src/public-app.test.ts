@@ -480,6 +480,7 @@ it("deleting one shopper preserves another shopper's live offer", async () => {
 
 it("settles an agreed offer with a single-use exact-basket Shopify Function", async () => {
   const calls: Array<{ query: string; variables: Record<string, any> }> = [];
+  let catalogUnavailable = false;
   const { base } = await start({}, async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
@@ -487,6 +488,8 @@ it("settles an agreed offer with a single-use exact-basket Shopify Function", as
     if (body.query.includes("codeDiscountNodeByCode")) return Response.json({ data: { codeDiscountNodeByCode: null } });
     if (body.query.includes("discountCodeAppCreate")) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "gid://shopify/DiscountCodeNode/1" }, userErrors: [] } } });
     if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
+    if (body.query.includes("DealifyOfferVariants")) return offerCatalogResponse(body);
+    if (catalogUnavailable) return new Response("Unrelated catalog refresh unavailable", { status: 503 });
     return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
   });
   const shop = "first.myshopify.com";
@@ -498,16 +501,55 @@ it("settles an agreed offer with a single-use exact-basket Shopify Function", as
   for (let round = 1; round < 4; round++) offer = await call("api/offers", { ...request, negotiationId: offer.negotiationId }).then(r => r.json());
   expect(offer.card.option.total).toBeLessThan(10000);
   const input = { shopperToken: session.token, offerId: offer.card.offerId, negotiationId: offer.negotiationId };
+  catalogUnavailable = true;
   const response = await call("api/accept", input);
   expect(response.status).toBe(200);
   const accepted = await response.json();
   expect(accepted.settlement.agreedTotal).toBe(offer.card.option.total);
+  expect(accepted.reply).toContain("checkout link");
+  expect(accepted.reply).not.toContain("opened");
   const mutation = calls.find(call => call.query.includes("discountCodeAppCreate"))!;
   expect(mutation.variables.codeAppDiscount).toMatchObject({ functionHandle: "dealify-discount", discountClasses: ["ORDER"], usageLimit: 1, appliesOnSubscription: false, combinesWith: { orderDiscounts: false, productDiscounts: false, shippingDiscounts: false }, endsAt: offer.card.expiresAt });
   const metafield = calls.find(call => call.query.includes("metafieldsSet"))!.variables.metafields[0];
   expect(JSON.parse(metafield.value)).toEqual({ currency: "CAD", total: offer.card.option.total, lines: [{ variantId: "gid://shopify/ProductVariant/1", quantity: 1, unitPrice: 10000 }] });
   expect((await call("api/accept", input).then(r => r.json())).settlement).toEqual(accepted.settlement);
   expect(calls.filter(call => call.query.includes("discountCodeAppCreate"))).toHaveLength(1);
+});
+
+function offerCatalogResponse(body: { query: string }, variantChanges = {}, productChanges = {}) {
+  const product = { id: "gid://shopify/Product/1", status: "ACTIVE", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, ...productChanges };
+  const variant = { id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } }, ...variantChanges };
+  return Response.json({ data: { shop: { currencyCode: "CAD" }, ...(body.query.includes("DealifyOfferVariants")
+    ? { nodes: [{ __typename: "ProductVariant", ...variant, product }] }
+    : { products: { nodes: [{ ...product, variants: { nodes: [variant] } }] } }) } });
+}
+
+it.each(["cost", "stock", "archived", "gift-card", "selling-plan", "bundle", "missing"])("rejects checkout when current offered-variant data changes: %s", async change => {
+  let accepting = false;
+  let minted = false;
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    if (body.query.includes("discountCodeAppCreate")) { minted = true; return Response.json({ data: {} }); }
+    if (!accepting) return offerCatalogResponse(body);
+    if (change === "missing") return Response.json({ data: { shop: { currencyCode: "CAD" }, nodes: [null] } });
+    const variant = change === "cost" ? { inventoryItem: { unitCost: { amount: "110.00", currencyCode: "CAD" } } }
+      : change === "stock" ? { inventoryQuantity: 0 } : change === "bundle" ? { requiresComponents: true } : {};
+    const product = change === "archived" ? { status: "ARCHIVED" }
+      : change === "gift-card" ? { isGiftCard: true } : change === "selling-plan" ? { requiresSellingPlan: true } : {};
+    return offerCatalogResponse(body, variant, product);
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, body: object) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, ...body }) });
+  const offer = await call("api/offers", { message: "Could you do $90? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } }).then(r => r.json());
+  expect(offer.card.status).toBe("live");
+  accepting = true;
+  const response = await call("api/accept", { offerId: offer.card.offerId, negotiationId: offer.negotiationId });
+  expect(response.status).toBe(400);
+  expect((await response.json()).reply).toContain("current rules");
+  expect(minted).toBe(false);
 });
 
 it.each([false, true])("keeps offers across a restart, including owner approval=%s", async (approval) => {
@@ -601,7 +643,7 @@ it.each(["create", "configure"])("revokes an uncertain %s result when PAUSE chan
     }
     if (creating) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } });
     if (body.query.includes("discountCodeDeactivate")) { deactivations++; return Response.json({ data: { discountCodeDeactivate: { userErrors: [] } } }); }
-    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+    return offerCatalogResponse(body);
   };
   ({ base } = await start({}, boundary));
   await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
@@ -628,7 +670,7 @@ it("reports paid orders and refunds from Shopify without counting checkout links
     if (body.query.includes("codeDiscountNodeByCode")) return Response.json({ data: { codeDiscountNodeByCode: null } });
     if (body.query.includes("discountCodeAppCreate")) { discountCode = body.variables.codeAppDiscount.code; return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } }); }
     if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
-    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+    return offerCatalogResponse(body);
   };
   const { base } = await start({}, boundary);
   const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
@@ -750,7 +792,7 @@ it.each(["customers/data_request", "customers/redact"])("does not deadlock %s ag
     if (body.query.includes("codeDiscountNodeByCode")) { entered(); await barrier; return Response.json({ data: { codeDiscountNodeByCode: null } }); }
     if (body.query.includes("discountCodeAppCreate")) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } });
     if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
-    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+    return offerCatalogResponse(body);
   });
   const shop = "first.myshopify.com";
   await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });

@@ -68,13 +68,14 @@ test("a lowball preserves the valid held quote, timer and round", async () => {
   expect(low.card.mood).toBe("offended");
 });
 
-test("text acceptance points to Deal without replacing the held offer or spending a round", async () => {
+test("text acceptance points to the card without replacing the offer or spending a round", async () => {
   const say = await shop("qa-accept");
   const fair = await say("Could you do $130? I am buying today.");
   const accepted = await say("Okay, I accept. Deal.");
   expect(accepted.card.offerId).toBe(fair.card.offerId);
   expect(accepted.card.round).toBe(fair.card.round);
-  expect(accepted.reply).toMatch(/Deal.*[Cc]heckout/);
+  expect(accepted.reply).toMatch(/accept button.*checkout/i);
+  expect(accepted.reply).toContain("no price hold applies");
 });
 
 test("policy questions cannot promise free shipping or no tax", async () => {
