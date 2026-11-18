@@ -4,6 +4,8 @@ export interface PublicStore {
   get<T = unknown>(shop: string, kind: string, id?: string): T | undefined;
   set(shop: string, kind: string, id: string, value: unknown, expires?: number | null): void;
   list<T = unknown>(shop: string, kind: string): T[];
+  shops(kind: string): string[];
+  entries<T = unknown>(shop: string, kind: string): { id: string; value: T }[];
   remove(shop: string, kind: string, id: string): void;
   removeKind(shop: string, kind: string): void;
   removeShop(shop: string): void;

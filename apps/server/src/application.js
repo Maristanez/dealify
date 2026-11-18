@@ -66,7 +66,21 @@ const state = {
   locks: new Map(),
 };
 function persistRuntime() {
+  pruneShopperData();
   durableState?.save({ offers: [...state.offers], negotiations: [...state.negotiations], shopperContexts: [...state.shopperContexts], owner: owner?.snapshot() });
+}
+function forgetShopperData(shopperId) {
+  state.shopperContexts.delete(shopperId);
+  for (const [id, offer] of state.offers) if (offer.shopperId === shopperId) state.offers.delete(id);
+  for (const [id, negotiation] of state.negotiations) if (negotiation.shopperId === shopperId) state.negotiations.delete(id);
+  owner?.forgetShopper(shopperId);
+  backboard?.forgetThreads(shopperId);
+}
+function pruneShopperData() {
+  if (!durableState?.activeShopperIds) return;
+  const active = new Set(durableState.activeShopperIds());
+  const recorded = new Set([...state.shopperContexts.keys(), ...[...state.offers.values()].map(offer => offer.shopperId), ...[...state.negotiations.values()].map(negotiation => negotiation.shopperId), ...(owner?.eventsAfter() || []).map(entry => entry.event.shopperId)]);
+  for (const id of recorded) if (!active.has(id)) forgetShopperData(id);
 }
 const db = ownerDb ?? (env.SUPABASE_URL && (env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY)
   ? createSupabaseDb({ environment: {
@@ -86,6 +100,8 @@ const owner = db ? await createOwnerRuntime({
 }) : null;
 
 const server = createServer(async (request, response) => {
+  try { pruneShopperData(); }
+  catch { sendJson(response, request, 503, { error: "persistence_unavailable" }); return; }
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 
   if (request.method === "OPTIONS") {
@@ -1249,7 +1265,7 @@ async function acceptOffer(offerId, payload) {
       if (!isRecordedDuplicate(error) && !state.dealWriteRetriesClosed) scheduleRetry(0);
     }
   })();
-  owner.publish({ at: new Date().toISOString(), surface: "storefront", shopperId: offer.shopperId, negotiationId: offer.negotiationId, kind: "settled", reasoning: "Agreed offer settled into Shopify Checkout.", ...audit });
+  owner.publish({ at: new Date().toISOString(), surface: "storefront", shopperId: offer.shopperId, negotiationId: offer.negotiationId, kind: env.PUBLIC_APP === "true" ? "decision" : "settled", reasoning: env.PUBLIC_APP === "true" ? "Checkout link created. Payment is not confirmed." : "Agreed offer settled into Shopify Checkout.", ...audit });
   return { ...settlement };
 }
 
@@ -2078,19 +2094,25 @@ let maintainingCheckout = false;
 const checkoutMaintenance = checkout ? setInterval(async () => {
   if (maintainingCheckout) return;
   maintainingCheckout = true;
-  try { await checkout.maintain(shopifyGraphql); }
+  try { persistRuntime(); await checkout.maintain(shopifyGraphql); }
   catch { console.error("[settlement] Checkout maintenance will retry."); }
   finally { maintainingCheckout = false; }
 }, 60000) : null;
 checkoutMaintenance?.unref();
 server.on("close", () => { clearInterval(checkoutMaintenance); owner?.dispose(); });
 server.deleteShopper = shopperId => withShopperLock(shopperId, async () => {
-  state.shopperContexts.delete(shopperId);
-  for (const [id, offer] of state.offers) if (offer.shopperId === shopperId) state.offers.delete(id);
-  for (const [id, negotiation] of state.negotiations) if (negotiation.shopperId === shopperId) state.negotiations.delete(id);
-  owner?.forgetShopper(shopperId);
-  backboard?.forgetThreads(shopperId);
+  forgetShopperData(shopperId);
   persistRuntime();
 });
+server.exportShopper = shopperId => withShopperLock(shopperId, async () => ({
+  sessionId: shopperId,
+  context: state.shopperContexts.get(shopperId) || null,
+  negotiations: [...state.negotiations.values()].filter(negotiation => negotiation.shopperId === shopperId).map(negotiation => ({
+    id: negotiation.id, productId: negotiation.productId, variantId: negotiation.variantId, quantity: negotiation.quantity,
+    context: negotiation.context || null,
+  })),
+  offers: [...state.offers.values()].filter(offer => offer.shopperId === shopperId).map(offer => currentCard(offer)),
+}));
+server.expireShopperData = () => persistRuntime();
 return server;
 }

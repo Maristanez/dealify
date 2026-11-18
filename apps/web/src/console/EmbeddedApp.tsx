@@ -4,6 +4,7 @@ import { createHttpPort } from "./data/httpPort";
 
 declare global { interface Window { shopify: { idToken(): Promise<string> } } }
 type Settings = { shopName: string; policyText: string };
+type Reporting = { currency: string; days: number; paidOrders: number; received: number; refunded: number; net: number; cancelledOrders: number; testOrders: number; pending: number; syncFailed: boolean; lastReconciledAt: string | null };
 type AppInfo = { shop: string; settings: Settings; embedUrl: string; supportEmail: string | null };
 
 async function appRequest(path: string, body?: unknown) {
@@ -18,9 +19,26 @@ export function EmbeddedApp() {
   const [info, setInfo] = useState<AppInfo>();
   const [settings, setSettings] = useState<Settings>({ shopName: "", policyText: "" });
   const [message, setMessage] = useState("");
+  const [report, setReport] = useState<Reporting>();
+  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [requests, setRequests] = useState<unknown[] | null>(null);
   useEffect(() => { void appRequest("/api/app").then((value: AppInfo) => { setInfo(value); setSettings(value.settings); }).catch(error => setMessage(error.message)); }, []);
+  useEffect(() => {
+    if (!info) return;
+    let active = true;
+    const refresh = () => void appRequest("/api/app/reporting").then(value => { if (active) setReport(value); }).catch(() => undefined);
+    refresh();
+    const timer = setInterval(refresh, 60000);
+    return () => { active = false; clearInterval(timer); };
+  }, [info?.shop]);
+  async function reconcile() {
+    setRefreshing(true);
+    try { setReport(await appRequest("/api/app/reporting/refresh", {})); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Reporting is temporarily unavailable."); }
+    finally { setRefreshing(false); }
+  }
+  const money = (cents: number) => new Intl.NumberFormat("en-CA", { style: "currency", currency: "CAD", currencyDisplay: "code" }).format(cents / 100);
   async function save(event: React.FormEvent) {
     event.preventDefault(); setSaving(true); setMessage("");
     try { await appRequest("/api/app/settings", settings); setMessage("Store details saved."); setInfo(value => value && { ...value, settings }); }
@@ -50,6 +68,22 @@ export function EmbeddedApp() {
       {message && <p role="status">{message}</p>}
       <p><a href="/privacy" target="_blank" rel="noreferrer">Privacy and data handling</a>{info.supportEmail && <> · <a href={`mailto:${info.supportEmail}`}>Contact support</a></>}</p>
     </section>
-    <Console port={port} shopName={info.settings.shopName || "Dealify"} />
+    <section className="paper" aria-label="Paid orders" style={{ margin: "1rem", padding: "1rem" }}>
+      <h2>Orders with Dealify discounts · Last 60 days</h2>
+      <p>Payments include tax and shipping. Test orders and full-price checkouts are excluded from these totals. These figures do not measure sales uplift or profit.</p>
+      {report ? <>
+        <dl>
+          <dt>Paid orders</dt><dd>{report.paidOrders}</dd>
+          <dt>Payments received</dt><dd>{money(report.received)}</dd>
+          <dt>Refunds</dt><dd>{money(report.refunded)}</dd>
+          <dt>Net payments</dt><dd>{money(report.net)}</dd>
+        </dl>
+        <p>{report.cancelledOrders} cancelled paid orders · {report.testOrders} test orders</p>
+        {(report.pending > 0 || report.syncFailed) && <p role="status">Some updates are still pending. Totals may be incomplete while Shopify reconciliation retries.</p>}
+        <p>{report.lastReconciledAt ? `Last reconciled: ${new Date(report.lastReconciledAt).toLocaleString()}` : "No completed reconciliation yet."}</p>
+      </> : <p role="status">Reporting has not loaded yet. Refresh to try again.</p>}
+      <button disabled={refreshing} onClick={() => void reconcile()}>{refreshing ? "Reconciling…" : "Refresh from Shopify"}</button>
+    </section>
+    <Console port={port} shopName={info.settings.shopName || "Dealify"} publicApp />
   </>;
 }

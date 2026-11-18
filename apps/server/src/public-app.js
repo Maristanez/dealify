@@ -8,6 +8,7 @@ import { createPublicStore } from "./infra/public-store.js";
 import { tenantRuntimes } from "./infra/tenant-runtime.js";
 import { storefrontProxy } from "./storefront-proxy.js";
 import { shopifySessions } from "./infra/shopify-sessions.js";
+import { orderLedger } from "./order-ledger.js";
 // Express exposes its CommonJS entry point; share its SDK runtime when injecting transport.
 const { setAbstractFetchFunc } = createRequire(import.meta.url)("@shopify/shopify-api/runtime");
 
@@ -37,20 +38,41 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
   });
   const app = express();
   const sessions = shopifySessions({ shopify, store });
+  const orders = orderLedger({ store, sessions, fetchImpl });
   const runtimes = tenantRuntimes({ store, sessions, env, fetchImpl });
+  let retentionRun;
+  function maintainRetention() {
+    if (retentionRun) return retentionRun;
+    retentionRun = runtimes.prune().then(() => store.prune()).catch(() => {
+      console.error("[retention] Cleanup will retry.");
+    }).finally(() => { retentionRun = undefined; });
+    return retentionRun;
+  }
+  const retention = setInterval(() => void maintainRetention(), 60000);
+  retention.unref();
+  void maintainRetention();
   app.disable("x-powered-by");
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     next();
   });
+  const webhookTasks = new Map();
+  async function processWebhook(shop, work) {
+    const previous = webhookTasks.get(shop) || Promise.resolve();
+    const current = previous.catch(() => undefined).then(work);
+    webhookTasks.set(shop, current);
+    try { return await current; }
+    finally { if (webhookTasks.get(shop) === current) webhookTasks.delete(shop); }
+  }
   app.post("/webhooks", express.raw({ type: "application/json", limit: "2mb" }), async (request, response) => {
     const rawBody = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
     const validation = await shopify.api.webhooks.validate({ rawBody, rawRequest: request, rawResponse: response });
     if (!validation.valid) return response.status(401).json({ error: "invalid_webhook" });
     const shop = validation.domain;
     if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop)) return response.status(400).json({ error: "invalid_shop" });
-    return sessions.exclusive(shop, async () => {
+    return processWebhook(shop, async () => {
+    const handle = async () => {
     const eventId = String(validation.webhookId || "");
     if (!eventId || eventId.length > 200) return response.status(400).json({ error: "invalid_webhook_id" });
     if (store.get(shop, "webhook", eventId)) return response.json({ ok: true });
@@ -70,30 +92,47 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
       store.removeShop(shop);
     } else if (validation.topic === "APP_UNINSTALLED") {
       await runtimes.remove(shop);
-      store.removeKind(shop, "session");
-      store.removeKind(shop, "shopper");
-      store.removeKind(shop, "runtime");
+      store.removeShop(shop);
       store.set(shop, "installation", "current", { active: false, uninstalledAt: new Date().toISOString() });
+    } else if (validation.topic === "APP_SCOPES_UPDATE") {
+      if (!Array.isArray(payload.current) || payload.current.some(scope => typeof scope !== "string")) return response.status(400).json({ error: "invalid_scopes" });
+      if (store.get(shop, "installation")?.active) {
+        for (const session of await store.sessionStorage.findSessionsByShop(shop)) { session.scope = payload.current.join(","); await store.sessionStorage.storeSession(session); }
+        if (PUBLIC_SCOPES.some(scope => !payload.current.includes(scope))) {
+          await runtimes.remove(shop);
+          const policy = store.get(shop, "policy") || { floorPct: 25, askOwner: false };
+          store.set(shop, "policy", "current", { ...policy, paused: true, updatedAt: new Date().toISOString() });
+        }
+      }
+    } else if (["ORDERS_PAID", "ORDERS_CANCELLED", "REFUNDS_CREATE"].includes(validation.topic)) {
+      const orderId = validation.topic === "REFUNDS_CREATE" ? payload.order_id : payload.admin_graphql_api_id || payload.id;
+      orders.queue(shop, orderId);
     } else if (validation.topic === "CUSTOMERS_REDACT") {
-      await runtimes.remove(shop);
-      // The pilot keeps no cross-session AI memory. Clear transient conversation state conservatively.
-      store.removeKind(shop, "shopper");
-      store.removeKind(shop, "runtime");
-      const orders = new Set((payload.orders_to_redact || []).map(String));
-      for (const order of store.list(shop, "order")) {
-        if (orders.has(String(order.id)) || String(order.customerId) === String(payload.customer?.id)) store.remove(shop, "order", String(order.id));
+      const customerId = payload.customer?.id == null ? null : String(payload.customer.id);
+      await runtimes.deleteCustomer(shop, customerId);
+      for (const id of (payload.orders_to_redact || []).map(String)) {
+        store.remove(shop, "order", id);
+        store.remove(shop, "order-job", id);
+        store.set(shop, "redacted-order", id, { redacted: true }, Date.now() + 60 * 86400000);
+      }
+      for (const entry of store.entries(shop, "privacy-request")) {
+        if (customerId && entry.value.customerId === customerId) store.remove(shop, "privacy-request", entry.id);
       }
     } else if (validation.topic === "CUSTOMERS_DATA_REQUEST") {
-      const orders = new Set((payload.orders_requested || []).map(String));
-      const data = store.list(shop, "order").filter(order => orders.has(String(order.id)));
+      const requestedOrders = new Set((payload.orders_requested || []).map(String));
+      const customerId = payload.customer?.id == null ? null : String(payload.customer.id);
+      const data = store.list(shop, "order").filter(order => requestedOrders.has(String(order.id)));
+      const shopperData = await runtimes.customerData(shop, customerId);
       store.set(shop, "privacy-request", String(payload.data_request?.id || validation.webhookId), {
         id: String(payload.data_request?.id || validation.webhookId), receivedAt: new Date().toISOString(),
-        data, note: "Provide this export to the requesting customer using the merchant's verified contact process. The app stores no customer names, email addresses or payment details.",
+        customerId, data, shopperData, note: "Provide this export using the merchant's verified customer contact process. Anonymous sessions cannot be matched to a customer account and expire after 24 hours. The app does not request names, email addresses or payment details; shoppers may include personal information in their messages.",
       }, Date.now() + 30 * 86400000);
     } else return response.status(400).json({ error: "unsupported_topic" });
     // Keep only a short-lived receipt, never the customer-bearing webhook body.
     store.set(shop, "webhook", eventId, { processed: true }, Date.now() + 7 * 86400000);
     response.status(200).json({ ok: true });
+    };
+    return ["SHOP_REDACT", "APP_UNINSTALLED", "APP_SCOPES_UPDATE"].includes(validation.topic) ? sessions.exclusive(shop, handle) : handle();
     });
   });
   app.use("/proxy", storefrontProxy({ shopify, store, runtimes, env }));
@@ -110,6 +149,16 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     });
   });
   app.get("/api/app/privacy-requests", (_request, response) => response.json({ requests: store.list(response.locals.shopify.session.shop, "privacy-request") }));
+  app.get("/api/app/reporting", async (_request, response) => {
+    const shop = response.locals.shopify.session.shop;
+    await orders.refresh(shop);
+    response.json(orders.report(shop));
+  });
+  app.post("/api/app/reporting/refresh", async (_request, response) => {
+    const shop = response.locals.shopify.session.shop;
+    await orders.refresh(shop, { scan: true });
+    response.json(orders.report(shop));
+  });
   app.post("/api/app/settings", express.json({ limit: "20kb" }), (request, response) => {
     const { shopName, policyText } = request.body || {};
     if (typeof shopName !== "string" || shopName.length > 100 || typeof policyText !== "string" || policyText.length > 12000) {
@@ -141,5 +190,5 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     const status = error.type === "entity.too.large" ? 413 : error.type === "entity.parse.failed" ? 400 : 503;
     response.status(status).json({ error: status === 503 ? "temporarily_unavailable" : "invalid_request" });
   });
-  return { app, shopify, close: async () => { await runtimes.close(); store.close(); } };
+  return { app, shopify, close: async () => { clearInterval(retention); await retentionRun; await orders.close(); await runtimes.close(); store.close(); } };
 }

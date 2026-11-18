@@ -46,6 +46,12 @@ export function createPublicStore({ path, encryptionKey }) {
     list(shop, kind) {
       return database.prepare("SELECT * FROM records WHERE shop=? AND kind=? AND (expires IS NULL OR expires>?)").all(shop, kind, Date.now()).map(decode);
     },
+    shops(kind) {
+      return database.prepare("SELECT DISTINCT shop FROM records WHERE kind=? AND (expires IS NULL OR expires>?)").all(kind, Date.now()).map(row => row.shop);
+    },
+    entries(shop, kind) {
+      return database.prepare("SELECT * FROM records WHERE shop=? AND kind=? AND (expires IS NULL OR expires>?)").all(shop, kind, Date.now()).map(row => ({ id: row.id, value: decode(row) }));
+    },
     remove(shop, kind, id) { database.prepare("DELETE FROM records WHERE shop=? AND kind=? AND id=?").run(shop, kind, id); },
     removeKind(shop, kind) { database.prepare("DELETE FROM records WHERE shop=? AND kind=?").run(shop, kind); },
     removeShop(shop) { database.prepare("DELETE FROM records WHERE shop=?").run(shop); },
