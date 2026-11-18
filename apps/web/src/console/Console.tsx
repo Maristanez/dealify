@@ -7,7 +7,7 @@ import { Feed, money } from "./Feed";
 import { Race } from "./Race";
 import { KeptBand } from "./KeptBand";
 import { RedTeamSummary } from "./RedTeamSummary";
-export function Console({ port, onSignOut, shopName = "Trailhead Co." }: { port: ConsolePort; onSignOut?: () => void; shopName?: string }) {
+export function Console({ port, onSignOut, shopName = "Trailhead Co.", publicApp = false }: { publicApp?: boolean; port: ConsolePort; onSignOut?: () => void; shopName?: string }) {
   const policyRevision = useRef(0);
   const [state, setState] = useState<ConsoleState>();
   const [attempt, setAttempt] = useState(0);
@@ -104,21 +104,21 @@ export function Console({ port, onSignOut, shopName = "Trailhead Co." }: { port:
       {error && <p className="paper" role="alert">{error}</p>}
       {state.pausePersistence === "pending" && <p className="paper" role="status">{state.policy.paused ? "PAUSE is active on this server." : "Deals are live on this server."} Saving that state to Supabase is still retrying.</p>}
       {streamMessage && <p className="paper" role="status">{streamMessage}</p>}
-      <KeptBand kpis={state.kpis} />
+      {!publicApp && <KeptBand kpis={state.kpis} />}
       <div className="console-columns">
         <Race products={state.products} policy={state.policy} draft={gymDraft} saving={adopting} onDraft={setGymDraft} onAdopt={() => void adoptDraft()} />
         {/* One Approvals instance, so its notice survives; CSS puts a pending card first and otherwise lets the live feed lead. */}
         <aside><Approvals approvals={state.pendingApprovals} port={port} onResolved={id => setState(value => value && { ...value, pendingApprovals: value.pendingApprovals.filter(approval => approval.id !== id) })} /><Feed events={events} /></aside>
       </div>
       <details className="more-settings"><summary>More settings</summary>
-        <div className="more-grid"><PolicyPanel products={state.products} policy={state.policy} port={port} value={gymDraft ?? null} onPolicy={policy => { setGymDraft(undefined); adopted(policy); }} onDraft={setGymDraft} /><RedTeamSummary result={state.redteam} /></div>
-        <div className="other-figures"><h3>Other figures</h3>
+        <div className="more-grid"><PolicyPanel products={state.products} policy={state.policy} port={port} value={gymDraft ?? null} onPolicy={policy => { setGymDraft(undefined); adopted(policy); }} onDraft={setGymDraft} />{!publicApp && <RedTeamSummary result={state.redteam} />}</div>
+        {!publicApp && <div className="other-figures"><h3>Other figures</h3>
           <ul>
             <li><span>Agent cost</span><b>{state.kpis && state.kpis.deals > 0 ? `$${state.kpis.agentCostUsd.toFixed(2)}` : "—"}</b></li>
             <li><span>Profit recovered</span><b>{state.kpis && state.kpis.deals > 0 ? money(state.kpis.profitRecovered) : "—"}</b></li>
             <li><span>Deals</span><b>{state.kpis && state.kpis.deals > 0 ? state.kpis.deals : "—"}</b></li>
           </ul>
-        </div>
+        </div>}
       </details>
     </main>
   </>;

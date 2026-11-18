@@ -1,6 +1,7 @@
 {% if request.page_type == 'product' %}
   {% capture dealify_strings %}
 {
+  "ai_notice": {{ 'dealify.ai_notice' | t | json }},
   "binding": {{ 'dealify.binding' | t | json }},
   "recover": {{ 'dealify.recover' | t | json }},
   "open": {{ 'dealify.open' | t | json }},

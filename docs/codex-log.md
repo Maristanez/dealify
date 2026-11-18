@@ -344,3 +344,47 @@
 **Remaining:** Live installation/theme/payment, targeted acceptance refresh, paid-order/refund reconciliation, retention and complete privacy deletion/export, provider lifecycle, production operations, real support email and final listing/review. Native Rust tests cannot execute on this host; compiled Shopify WASM tests are the execution evidence. The user reports Railway unavailable, which is treated as a deployment blocker, not a verified provider-wide outage. This remains a draft PR.
 
 **Checkpoint review fixes:** Standards review found two issues (cold-start session deletion and missing binding disclosure); spec review found two (uncertain mint invalidation and lost checkout-link recovery). All four are fixed with public-boundary regressions. Current suite: 622 tests / 60 files; affected typechecks and Liquid validation pass. Revocation mutation validates against 2026-10. A browser fixture was inspected at 390×844; this is local visual evidence, not a live theme or paid-checkout test.
+
+
+## 2026-11-18 — Paid reporting and privacy lifecycle checkpoint
+
+**Changes:** Added signed paid/refund/cancellation handling, durable order jobs with backoff, bounded paginated reconciliation, and a 60-day CAD payment ledger keyed to recorded Dealify discount codes. Public reporting excludes test orders and full-price checkouts, labels tax/shipping inclusion, and reports pending synchronization. Removed unsupported customer/revenue recovery and mixed-currency profit claims from public Console. Customer exports now include every retained negotiation context and public cards; redaction targets the customer, removes materialized exports, and suppresses re-import of redacted orders. Per-session expiry runs in memory and over cold saved snapshots. Uninstall erases active app records, guards stale writes, and required-scope removal pauses offers.
+
+**Review:** Standards found a lock inversion between privacy webhooks and checkout. Spec found the same bug plus cold-snapshot retention and incomplete export history. Separate webhook serialization, independent credential locks, cold snapshot sweeping and complete context export resolve all findings; reviewers confirmed the fixes. HTTP regressions reproduced the deadlock and missing export before fixes.
+
+**Evidence:** 629 tests / 60 files pass; server/web TypeScript checks and production Console build pass. Order/reconciliation GraphQL validates against 2026-10 without customer-reading fields. Tests cover issued-versus-paid totals, duplicate delivery, refunds/cancellation, missed updates, redaction/re-import prevention, cross-customer privacy isolation, expiry, uninstall during a shopper request, scope loss and concurrent privacy/checkout.
+
+**Limits:** No live Shopify payment or protected-data approval yet. AI is still disabled while its provider lifecycle is implemented. Real support email, public privacy content, hosting/backup operations and development-store gates remain open. Read-order access covers the latest 60 days; displayed figures intentionally use that retention window. No production release claim.
+
+
+## 2026-11-18 — AI restoration checkpoint
+
+**Changes:** Added opt-in public AI chat with a fresh empty assistant/thread per call, pre-send durable cleanup records, forced memory off and no tools/media/search, generic store-specific public prompts, verified response ownership, and safe fallbacks. Cleanup cancels known unfinished runs and retries deletion across restarts and uninstall. Shopper deletion aborts processing and prevents subsequent calls from the interrupted request. Removed browser-supplied catalog fallback data. Added processing disclosures and public environment documentation. Production activation remains gated on actual provider terms review.
+
+**Evidence:** 637 tests / 60 files pass and affected TypeScript checks pass. Liquid, widget asset and locale validation pass. A real Backboard request with synthetic policy data using the existing account returned a grounded answer in about 2.9 seconds; both resource DELETE requests returned 200 and no jobs remained. Existing Railway access showed the app service offline and an expired trial. The key was transferred privately to an ignored local test environment; no desktop automation permission was required and no production setting was changed.
+
+**Remaining at initial checkpoint:** Production provider terms, privacy/support pages, deployment/backup readiness, live Shopify install/payment, listing and approval. The user will supply the support email later.
+
+**AI review follow-up:** Both review axes confirmed the fixes for per-event retrieval rejection, asynchronous durable deletion (fallback no longer waits for provider cleanup), and definitive creation failures. HTTP regressions reproduced all three issues. A second live synthetic run verified cancellation plus both resource deletions (all HTTP 200), with zero jobs left. Pending erasure counts and aggregate maintenance logging make failures visible.
+
+
+## 2026-11-18 — Public documents and deployment preparation
+
+**Changes:** Added unauthenticated privacy/support draft pages, validated support email, minimal readiness covering Console files and committed encrypted-record storage, draining/idempotent shutdown, a Node 24 Docker recipe, public-entry-point legacy Railway transition, CI application/container checks and a deployment/recovery runbook. Official research records the December 1 config cutoff, backup/volume limits and log-retention uncertainty.
+
+**Evidence:** 643 tests / 60 files and affected TypeScript checks pass. Readiness first reproduced HTTP 404, then passed; additional HTTP checks reject a missing Console build and wrong decryption key. Docker is unavailable locally; container CI evidence is pending. The in-app browser confirms the Railway trial remains expired and service offline, without requesting desktop permissions.
+
+**Limits:** No production mutation or launch claim. Provider/hosting terms, support email, configuration migration, persistence/backup/restore/deletion replay, continuous alerts and live Shopify gates remain open.
+
+**Operations review:** Standards found no actionable violations. Spec found unpublished usage quotas; the support page now reads the same limits as enforcement, including configured daily totals and reset-window semantics. An HTTP regression failed before the disclosure and passes after it.
+
+**Container follow-up:** GitHub's application job passed tests, all workspace typechecks and build. The isolated Docker build exposed a missing root `tsconfig.pure.json`; the build context now includes the complete root TypeScript configuration chain. Re-running CI verifies the fix.
+
+
+## 2026-11-18 — Targeted acceptance refresh
+
+**Changes:** Public acceptance fetches only the agreed variants in one Admin GraphQL request, checking current status, CAD, costs, stock and unsupported configurations before the existing engine audit. Public mode still refuses stale fallback. Checkout replies now describe a ready link and make no full-price hold claim.
+
+**Evidence:** 650 tests / 60 files and server TypeScript check pass. The acceptance regression failed with an unavailable full catalog before the targeted refresh and passes afterward; seven changed-data cases refuse minting. The new query validates against 2026-10 (read_products/read_inventory). A local scratch validator lacked schema assets; the original bundled validator passed. Separate standards/spec reviews found no actionable issues. Updated the existing text-acceptance regression to check the corrected button and no-hold wording.
+
+**Deployment verification:** GitHub run 44248127150 passed application tests, complete workspace typecheck/build, Docker build, HTTP readiness/auth/public-page smoke checks and graceful container exit. Actual Railway rollout and live Shopify acceptance remain unverified.

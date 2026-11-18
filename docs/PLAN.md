@@ -2,6 +2,8 @@
 
 **Public-app work (November 2026):** Follow [PUBLIC-APP-PLAN.md](PUBLIC-APP-PLAN.md) for the user-authorized free pilot and Shopify approval gates. The historical hackathon status below is not evidence of public-app launch readiness.
 
+**Public pilot Now / Next / Blocked (Nov 18):** AI lifecycle review fixes, public documents, readiness and deployment recipe implemented; next verify CI and deployment migration, then live store acceptance. Blocked on operational hosting, actual support email, provider/hosting terms and Shopify login; backup deletion replay/restore proof remains unfinished.
+
 **Hack the North 2026 · team of 3 · code window Sat 19 Sep 00:00 → Sun 20 Sep 08:00 EDT (32 h)**
 
 ## STATUS BOARD

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,8 +23,8 @@ function webhook(topic: string, shop: string, body: unknown, valid = true) {
     "X-Shopify-Hmac-Sha256": valid ? createHmac("sha256", env.SHOPIFY_API_SECRET).update(text).digest("base64") : "invalid",
   }, body: text };
 }
-function proxy(shop: string, route: string) {
-  const query = new URLSearchParams({ shop, timestamp: String(Math.floor(Date.now() / 1000)), path_prefix: "/apps/dealify", logged_in_customer_id: "" });
+function proxy(shop: string, route: string, customerId = "") {
+  const query = new URLSearchParams({ shop, timestamp: String(Math.floor(Date.now() / 1000)), path_prefix: "/apps/dealify", logged_in_customer_id: customerId });
   const message = [...query.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("");
   query.set("signature", createHmac("sha256", env.SHOPIFY_API_SECRET).update(message).digest("hex"));
   return `/proxy/${route}?${query}`;
@@ -54,6 +54,238 @@ afterEach(async () => {
     server.closeAllConnections(); server.close(() => resolve());
   })));
   for (const cleanup of cleanups.splice(0)) await cleanup();
+});
+
+const aiEnv = {
+  PUBLIC_AI_ENABLED: "true", BACKBOARD_API_KEY: "provider-test-key",
+  BACKBOARD_MODEL_PROVIDER: "openai", BACKBOARD_MODEL_NAME: "test-model",
+  BACKBOARD_TERMS_REVIEWED_AT: "2026-11-18", BACKBOARD_PROVIDER_TERMS_URL: "https://example.com/provider-terms",
+};
+
+it("reports local readiness without contacting providers and refuses traffic while draining", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-health-test-"));
+  writeFileSync(join(directory, "index.html"), "<!doctype html><html><head></head><body>Console</body></html>");
+  const instance = await start({ WEB_DIST_PATH: directory }, async () => { throw new Error("Health must not contact providers"); });
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+  const health = await fetch(`${instance.base}/health`);
+  expect(health.status).toBe(200);
+  expect(health.headers.get("cache-control")).toBe("no-store");
+  expect(await health.json()).toEqual({ status: "ready" });
+  instance.drain();
+  expect((await fetch(`${instance.base}/health`)).status).toBe(503);
+  expect((await fetch(`${instance.base}/api/app`)).status).toBe(503);
+});
+
+it("keeps readiness unavailable when the Console build is missing or persisted credentials cannot be decrypted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-health-test-"));
+  const config = { WEB_DIST_PATH: directory, DATABASE_PATH: join(directory, "app.sqlite") };
+  const first = await start(config);
+  expect((await fetch(`${first.base}/health`)).status).toBe(503);
+  writeFileSync(join(directory, "index.html"), "<!doctype html><html><head></head><body>Console</body></html>");
+  expect((await fetch(`${first.base}/health`)).status).toBe(200);
+  await fetch(`${first.base}/api/app`, { headers: { Authorization: `Bearer ${token("first.myshopify.com")}` } });
+  await first.close();
+  const restarted = await start({ ...config, DATA_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString("base64") });
+  const health = await fetch(`${restarted.base}/health`);
+  expect(health.status).toBe(503);
+  expect(await health.json()).toEqual({ status: "unavailable" });
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+});
+
+it("answers with the current merchant's public policy and deletes isolated AI conversations", async () => {
+  const requests: Array<{ url: string; method: string; body: any }> = [];
+  let resource = 0;
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), method = init?.method || "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      requests.push({ url, method, body });
+      if (method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: `assistant-${++resource}` });
+      if (/\/assistants\/[^/]+\/threads$/.test(url)) return Response.json({ thread_id: `thread-${++resource}` });
+      if (url.endsWith("/threads/messages")) return new Response(`data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: body.thread_id, assistant_id: body.assistant_id, content: "Returns are accepted within fourteen days." })}\n\n`);
+      throw new Error("Unexpected provider request");
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  for (const [index, shop] of ["first.myshopify.com", "second.myshopify.com"].entries()) {
+    const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+    await fetch(`${base}/api/app/settings`, { method: "POST", headers, body: JSON.stringify({ shopName: `Store ${index}`, policyText: `Returns within fourteen days. Policy marker ${index}.` }) });
+    await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+    const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+    const answer = await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?", product: { handle: "invented", price: "$1", privateNotes: "untrusted-payload-marker" } }) }).then(r => r.json());
+    expect(answer.reply).toBe("Returns are accepted within fourteen days.");
+  }
+  const messages = requests.filter(request => request.url.endsWith("/threads/messages"));
+  expect(messages).toHaveLength(2);
+  for (const [index, message] of messages.entries()) {
+    expect(message.body).toMatchObject({ memory: "off", memory_response_citation: false, web_search: "off", tools: [] });
+    expect(message.body.content).toContain(`Policy marker ${index}`);
+    expect(message.body.content).not.toContain(`Policy marker ${1 - index}`);
+    expect(message.body.content).not.toContain("untrusted-payload-marker");
+    expect(message.body.system_prompt).not.toMatch(/Jarvis|Trailhead/);
+    expect(requests.some(request => request.method === "DELETE" && request.url.endsWith(`/threads/${message.body.thread_id}`))).toBe(true);
+    expect(requests.some(request => request.method === "DELETE" && request.url.endsWith(`/assistants/${message.body.assistant_id}`))).toBe(true);
+  }
+  expect(messages[0]?.body.assistant_id).not.toBe(messages[1]?.body.assistant_id);
+});
+
+it("deleting a shopper aborts AI processing and prevents later calls from the interrupted offer", async () => {
+  let started!: () => void;
+  const processing = new Promise<void>(resolve => { started = resolve; });
+  let modelCalls = 0;
+  let aborted = false;
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (/\/assistants\/[^/]+\/threads$/.test(url)) return Response.json({ thread_id: "thread" });
+      if (url.endsWith("/threads/messages")) {
+        modelCalls++;
+        if (modelCalls === 1) return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("Cancelled")); }, { once: true });
+          started();
+        });
+        return new Response("unwanted later model call", { status: 503 });
+      }
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, body: unknown) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, ...body as object }) });
+  const offer = call("api/offers", { message: "Could you do $90? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } });
+  await processing;
+  expect((await call("api/session/delete", {})).status).toBe(200);
+  await offer;
+  expect(aborted).toBe(true);
+  expect(modelCalls).toBe(1);
+});
+
+it("cancels a timed-out AI run before deletion and retries failed erasure after uninstall and restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-ai-test-"));
+  const config = { ...aiEnv, DATABASE_PATH: join(directory, "app.sqlite"), BACKBOARD_TIMEOUT_MS: "100" };
+  const effects: string[] = [];
+  let deletingFails = true;
+  const boundary: typeof fetch = async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE" || url.endsWith("/cancel")) {
+        effects.push(`${init?.method} ${new URL(url).pathname}`);
+        return new Response("", { status: deletingFails && init?.method === "DELETE" ? 503 : 200 });
+      }
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/assistants/assistant/threads")) return Response.json({ thread_id: "thread" });
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "run_started", run_id: "run", thread_id: "thread", assistant_id: "assistant" })}\n\n`));
+        init?.signal?.addEventListener("abort", () => controller.error(new Error("Timeout")), { once: true });
+      } }));
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  };
+  const first = await start(config, boundary);
+  const shop = "first.myshopify.com";
+  await fetch(`${first.base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(first.base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const response = await fetch(first.base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  expect(response.status).toBe(200); // Deterministic fallback still works during a provider outage.
+  expect(effects[0]).toBe("POST /api/threads/thread/runs/run/cancel");
+  await fetch(`${first.base}/webhooks`, webhook("app/uninstalled", shop, {}));
+  await first.close();
+  deletingFails = false;
+  effects.length = 0;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 3600000);
+  try {
+    await start({ ...config, PUBLIC_AI_ENABLED: "false" }, boundary);
+    await vi.waitFor(() => expect(effects).toContain("DELETE /api/assistants/assistant"));
+    expect(effects.indexOf("DELETE /api/threads/thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+  } finally { clock.mockRestore(); }
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+});
+
+it.each(["uncertain", "rejected"])("cleans up %s thread creation without sending shopper text", async mode => {
+  const effects: string[] = [];
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      effects.push(`${init?.method || "GET"} ${new URL(url).pathname}`);
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (init?.method === "POST" && url.endsWith("/threads")) {
+        if (mode === "rejected") return new Response("Too many requests", { status: 429 });
+        throw new Error("Response lost after upstream creation");
+      }
+      if (url.includes("/assistants/assistant/threads")) return Response.json(mode === "rejected" ? [] : [{ thread_id: "unknown-thread" }]);
+      throw new Error("Shopper content must not be sent after uncertain creation");
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  await vi.waitFor(() => expect(effects).toContain("DELETE /api/assistants/assistant"));
+  expect(effects).not.toContain("POST /api/threads/messages");
+  if (mode === "uncertain") {
+    expect(effects).toContain("DELETE /api/threads/unknown-thread");
+    expect(effects.indexOf("DELETE /api/threads/unknown-thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+  }
+});
+
+it.each(["unreviewed", "wrong-thread", "recalled-memory", "memory-event"])("uses a safe response for %s AI configuration or context", async mode => {
+  let messages = 0;
+  const { base } = await start({ ...aiEnv, ...(mode === "unreviewed" ? { BACKBOARD_TERMS_REVIEWED_AT: "" } : {}) }, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/threads")) return Response.json({ thread_id: "thread" });
+      messages++;
+      const earlierMemory = mode === "memory-event" ? `data: ${JSON.stringify({ type: "memory_retrieved", memories: [{ content: "Another shopper's information" }] })}\n\n` : "";
+      return new Response(`${earlierMemory}data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: mode === "wrong-thread" ? "someone-else" : "thread", assistant_id: "assistant", content: "Private remembered answer", retrieved_memories: mode === "recalled-memory" ? [{ content: "Another shopper's information" }] : [] })}\n\n`);
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  expect(session.aiEnabled).toBe(mode !== "unreviewed");
+  const answer = await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) }).then(r => r.json());
+  expect(answer.reply).toContain("Contact the store");
+  expect(answer.reply).not.toContain("remembered");
+  expect(messages).toBe(mode === "unreviewed" ? 0 : 1);
+});
+
+it("returns fallback without waiting for provider deletion", async () => {
+  let release!: () => void;
+  const deletion = new Promise<void>(resolve => { release = resolve; });
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") { await deletion; return Response.json({}); }
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/threads")) return Response.json({ thread_id: "thread" });
+      return new Response("Unavailable", { status: 503 });
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const answer = fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([answer.then(r => r.status), new Promise(resolve => { timer = setTimeout(() => resolve("waiting for deletion"), 250); })]);
+    expect(result).toBe(200);
+  } finally { clearTimeout(timer); release(); await answer; }
 });
 
 it("does not let an old uninstall retry disable a fresh installation", async () => {
@@ -126,6 +358,25 @@ it("loads App Bridge before the embedded Console and restricts framing to Shopif
   expect(html).toContain('<meta name="shopify-api-key" content="test-key">');
   expect(html.indexOf("shopifycloud/app-bridge.js")).toBeLessThan(html.indexOf('type="module"'));
   expect(html).not.toContain("test-secret");
+});
+
+it("serves privacy and support information without requiring a merchant login", async () => {
+  const { base } = await start({ SUPPORT_EMAIL: "help@example.com", PILOT_DAILY_TURNS: "850" });
+  const privacy = await fetch(`${base}/privacy`);
+  expect(privacy.status).toBe(200);
+  const html = await privacy.text();
+  expect(html).toContain("Dealify privacy policy");
+  expect(html).toContain("24 hours");
+  expect(html).toContain("Backboard");
+  expect(html).toContain("help@example.com");
+  expect(html).not.toContain(env.SHOPIFY_API_SECRET);
+  const support = await fetch(`${base}/support`);
+  expect(support.status).toBe(200);
+  const help = await support.text();
+  expect(help).toContain("Enable the app embed");
+  expect(help).toContain("850 messages per store per 24-hour window");
+  expect(help).toContain("30 messages per shopper session per hour");
+  expect(help).toContain("Windows begin with the first counted action");
 });
 
 it("uses the verified Shopify shop and isolates merchant settings", async () => {
@@ -229,6 +480,7 @@ it("deleting one shopper preserves another shopper's live offer", async () => {
 
 it("settles an agreed offer with a single-use exact-basket Shopify Function", async () => {
   const calls: Array<{ query: string; variables: Record<string, any> }> = [];
+  let catalogUnavailable = false;
   const { base } = await start({}, async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
@@ -236,6 +488,8 @@ it("settles an agreed offer with a single-use exact-basket Shopify Function", as
     if (body.query.includes("codeDiscountNodeByCode")) return Response.json({ data: { codeDiscountNodeByCode: null } });
     if (body.query.includes("discountCodeAppCreate")) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "gid://shopify/DiscountCodeNode/1" }, userErrors: [] } } });
     if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
+    if (body.query.includes("DealifyOfferVariants")) return offerCatalogResponse(body);
+    if (catalogUnavailable) return new Response("Unrelated catalog refresh unavailable", { status: 503 });
     return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
   });
   const shop = "first.myshopify.com";
@@ -247,16 +501,55 @@ it("settles an agreed offer with a single-use exact-basket Shopify Function", as
   for (let round = 1; round < 4; round++) offer = await call("api/offers", { ...request, negotiationId: offer.negotiationId }).then(r => r.json());
   expect(offer.card.option.total).toBeLessThan(10000);
   const input = { shopperToken: session.token, offerId: offer.card.offerId, negotiationId: offer.negotiationId };
+  catalogUnavailable = true;
   const response = await call("api/accept", input);
   expect(response.status).toBe(200);
   const accepted = await response.json();
   expect(accepted.settlement.agreedTotal).toBe(offer.card.option.total);
+  expect(accepted.reply).toContain("checkout link");
+  expect(accepted.reply).not.toContain("opened");
   const mutation = calls.find(call => call.query.includes("discountCodeAppCreate"))!;
   expect(mutation.variables.codeAppDiscount).toMatchObject({ functionHandle: "dealify-discount", discountClasses: ["ORDER"], usageLimit: 1, appliesOnSubscription: false, combinesWith: { orderDiscounts: false, productDiscounts: false, shippingDiscounts: false }, endsAt: offer.card.expiresAt });
   const metafield = calls.find(call => call.query.includes("metafieldsSet"))!.variables.metafields[0];
   expect(JSON.parse(metafield.value)).toEqual({ currency: "CAD", total: offer.card.option.total, lines: [{ variantId: "gid://shopify/ProductVariant/1", quantity: 1, unitPrice: 10000 }] });
   expect((await call("api/accept", input).then(r => r.json())).settlement).toEqual(accepted.settlement);
   expect(calls.filter(call => call.query.includes("discountCodeAppCreate"))).toHaveLength(1);
+});
+
+function offerCatalogResponse(body: { query: string }, variantChanges = {}, productChanges = {}) {
+  const product = { id: "gid://shopify/Product/1", status: "ACTIVE", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, ...productChanges };
+  const variant = { id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } }, ...variantChanges };
+  return Response.json({ data: { shop: { currencyCode: "CAD" }, ...(body.query.includes("DealifyOfferVariants")
+    ? { nodes: [{ __typename: "ProductVariant", ...variant, product }] }
+    : { products: { nodes: [{ ...product, variants: { nodes: [variant] } }] } }) } });
+}
+
+it.each(["cost", "stock", "archived", "gift-card", "selling-plan", "bundle", "missing"])("rejects checkout when current offered-variant data changes: %s", async change => {
+  let accepting = false;
+  let minted = false;
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    if (body.query.includes("discountCodeAppCreate")) { minted = true; return Response.json({ data: {} }); }
+    if (!accepting) return offerCatalogResponse(body);
+    if (change === "missing") return Response.json({ data: { shop: { currencyCode: "CAD" }, nodes: [null] } });
+    const variant = change === "cost" ? { inventoryItem: { unitCost: { amount: "110.00", currencyCode: "CAD" } } }
+      : change === "stock" ? { inventoryQuantity: 0 } : change === "bundle" ? { requiresComponents: true } : {};
+    const product = change === "archived" ? { status: "ARCHIVED" }
+      : change === "gift-card" ? { isGiftCard: true } : change === "selling-plan" ? { requiresSellingPlan: true } : {};
+    return offerCatalogResponse(body, variant, product);
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, body: object) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, ...body }) });
+  const offer = await call("api/offers", { message: "Could you do $90? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } }).then(r => r.json());
+  expect(offer.card.status).toBe("live");
+  accepting = true;
+  const response = await call("api/accept", { offerId: offer.card.offerId, negotiationId: offer.negotiationId });
+  expect(response.status).toBe(400);
+  expect((await response.json()).reply).toContain("current rules");
+  expect(minted).toBe(false);
 });
 
 it.each([false, true])("keeps offers across a restart, including owner approval=%s", async (approval) => {
@@ -350,7 +643,7 @@ it.each(["create", "configure"])("revokes an uncertain %s result when PAUSE chan
     }
     if (creating) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } });
     if (body.query.includes("discountCodeDeactivate")) { deactivations++; return Response.json({ data: { discountCodeDeactivate: { userErrors: [] } } }); }
-    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", metafield: { value: "2020-01-01" }, variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+    return offerCatalogResponse(body);
   };
   ({ base } = await start({}, boundary));
   await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
@@ -363,4 +656,159 @@ it.each(["create", "configure"])("revokes an uncertain %s result when PAUSE chan
   const response = await call("api/accept", { shopperToken: session.token, offerId: reply.card.offerId, negotiationId: reply.negotiationId });
   expect(response.status).toBe(400);
   expect(deactivations).toBe(1);
+});
+
+it("reports paid orders and refunds from Shopify without counting checkout links", async () => {
+  const shop = "first.myshopify.com";
+  let liveOrder: Record<string, unknown> | null = null;
+  let discountCode = "";
+  const boundary: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    if (body.query.includes("DealifyOrders")) return Response.json({ data: { orders: { nodes: liveOrder ? [liveOrder] : [], pageInfo: { hasNextPage: false } } } });
+    if (body.query.includes("DealifyOrder(")) return Response.json({ data: { order: liveOrder } });
+    if (body.query.includes("codeDiscountNodeByCode")) return Response.json({ data: { codeDiscountNodeByCode: null } });
+    if (body.query.includes("discountCodeAppCreate")) { discountCode = body.variables.codeAppDiscount.code; return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } }); }
+    if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
+    return offerCatalogResponse(body);
+  };
+  const { base } = await start({}, boundary);
+  const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, data: unknown) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  const input = { shopperToken: session.token, message: "Could you do $90? It is last season and I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } };
+  let reply: any = {};
+  for (let round = 0; round < 4; round++) reply = await call("api/offers", { ...input, negotiationId: reply.negotiationId }).then(r => r.json());
+  expect((await call("api/accept", { shopperToken: session.token, offerId: reply.card.offerId, negotiationId: reply.negotiationId })).status).toBe(200);
+  const report = () => fetch(`${base}/api/app/reporting`, { headers }).then(r => r.json());
+  expect(await report()).toMatchObject({ paidOrders: 0, received: 0, refunded: 0, net: 0 });
+  const money = (amount: string) => ({ shopMoney: { amount, currencyCode: "CAD" } });
+  liveOrder = { id: "gid://shopify/Order/123", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), cancelledAt: null, test: false, displayFinancialStatus: "PAID", discountCodes: [discountCode], customer: { id: "gid://shopify/Customer/456" }, totalReceivedSet: money("100.00"), totalRefundedSet: money("0.00") };
+  const paid = webhook("orders/paid", shop, { id: 123, discount_codes: [{ code: discountCode }] });
+  expect((await fetch(`${base}/webhooks`, paid)).status).toBe(200);
+  expect(await report()).toMatchObject({ paidOrders: 1, received: 10000, refunded: 0, net: 10000 });
+  expect((await fetch(`${base}/webhooks`, paid)).status).toBe(200);
+  liveOrder = { ...liveOrder, updatedAt: new Date(Date.now() + 1000).toISOString(), displayFinancialStatus: "PARTIALLY_REFUNDED", totalRefundedSet: money("25.00") };
+  expect((await fetch(`${base}/webhooks`, webhook("refunds/create", shop, { id: 321, order_id: 123 }))).status).toBe(200);
+  expect(await report()).toMatchObject({ paidOrders: 1, received: 10000, refunded: 2500, net: 7500 });
+  liveOrder = { ...liveOrder, updatedAt: new Date(Date.now() + 2000).toISOString(), cancelledAt: new Date().toISOString(), displayFinancialStatus: "REFUNDED", totalRefundedSet: money("100.00") };
+  const reconciled = await fetch(`${base}/api/app/reporting/refresh`, { method: "POST", headers }).then(r => r.json());
+  expect(reconciled).toMatchObject({ paidOrders: 1, refunded: 10000, net: 0, cancelledOrders: 1, pending: 0 });
+  expect((await fetch(`${base}/webhooks`, webhook("customers/redact", shop, { customer: { id: 456 }, orders_to_redact: [123] }))).status).toBe(200);
+  const afterDeletion = await fetch(`${base}/api/app/reporting/refresh`, { method: "POST", headers }).then(r => r.json());
+  expect(afterDeletion).toMatchObject({ paidOrders: 0, refunded: 0, net: 0 });
+});
+
+it("exports and redacts only the signed customer's shopper data", async () => {
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com", headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+  const a = await fetch(base + proxy(shop, "session", "456"), { method: "POST" }).then(r => r.json());
+  const b = await fetch(base + proxy(shop, "session", "789"), { method: "POST" }).then(r => r.json());
+  const call = (customer: string, route: string, data: unknown) => fetch(base + proxy(shop, route, customer), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  const aOffer = await call("456", "api/offers", { shopperToken: a.token, message: "Could you do $90? This is for my first marathon.", product: { handle: "sizes", selectedVariantId: "1" } }).then(r => r.json());
+  const bOffer = await call("789", "api/offers", { shopperToken: b.token, message: "Could you do $95? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } }).then(r => r.json());
+  await call("456", "api/session/reset", { shopperToken: a.token });
+  expect((await fetch(`${base}/webhooks`, webhook("customers/data_request", shop, { customer: { id: 456 }, orders_requested: [], data_request: { id: 99 } }))).status).toBe(200);
+  const exported = await fetch(`${base}/api/app/privacy-requests`, { headers }).then(r => r.json());
+  expect(JSON.stringify(exported)).toContain("first marathon");
+  expect(JSON.stringify(exported)).not.toContain(bOffer.negotiationId);
+  expect(JSON.stringify(exported)).not.toMatch(/unitCost|floorPct|ownerRank/);
+  expect((await fetch(`${base}/webhooks`, webhook("customers/redact", shop, { customer: { id: 456 }, orders_to_redact: [] }))).status).toBe(200);
+  expect((await call("456", "api/offers/status", { shopperToken: a.token, offerId: aOffer.card.offerId, negotiationId: aOffer.negotiationId })).status).toBe(401);
+  expect((await call("789", "api/offers/status", { shopperToken: b.token, offerId: bOffer.card.offerId, negotiationId: bOffer.negotiationId })).status).toBe(200);
+  expect((await fetch(`${base}/api/app/privacy-requests`, { headers }).then(r => r.json())).requests).toEqual([]);
+});
+
+it("expires shopper conversation data after 24 hours even while the shop remains active", async () => {
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const offer = await fetch(base + proxy(shop, "api/offers"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "Could you do $90?", product: { handle: "sizes", selectedVariantId: "1" } }) }).then(r => r.json());
+  const feed = async () => {
+    const controller = new AbortController();
+    const response = await fetch(`${base}/api/console/stream`, { headers: { Authorization: `Bearer ${token(shop)}` }, signal: controller.signal });
+    const chunk = await response.body!.getReader().read();
+    controller.abort();
+    return new TextDecoder().decode(chunk.value);
+  };
+  expect(await feed()).toContain(offer.negotiationId);
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.now() + 25 * 3600000);
+    expect(await feed()).not.toContain(offer.negotiationId);
+  } finally { vi.useRealTimers(); }
+});
+
+it("does not let an in-flight shopper request restore data after uninstall", async () => {
+  let unblock!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { unblock = resolve; });
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    entered(); await barrier;
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com", headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const pending = fetch(base + proxy(shop, "api/offers"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "Could you do $90?", product: { handle: "sizes", selectedVariantId: "1" } }) });
+  await waiting;
+  expect((await fetch(`${base}/webhooks`, webhook("app/uninstalled", shop, {}))).status).toBe(200);
+  unblock();
+  expect((await pending).status).toBe(503);
+  const state = await fetch(`${base}/api/console/state`, { headers }).then(r => r.json());
+  expect(state.policy.paused).toBe(true);
+  expect(state.pendingApprovals).toEqual([]);
+});
+
+it("pauses offers if Shopify removes a required scope", async () => {
+  const { base } = await start();
+  const shop = "first.myshopify.com", headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+  expect((await fetch(`${base}/webhooks`, webhook("app/scopes_update", shop, { current: ["read_products"] }))).status).toBe(200);
+  const state = await fetch(`${base}/api/console/state`, { headers }).then(r => r.json());
+  expect(state.policy.paused).toBe(true);
+});
+
+it.each(["customers/data_request", "customers/redact"])("does not deadlock %s against an in-flight checkout", async topic => {
+  let release!: () => void, entered!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    if (body.query.includes("codeDiscountNodeByCode")) { entered(); await barrier; return Response.json({ data: { codeDiscountNodeByCode: null } }); }
+    if (body.query.includes("discountCodeAppCreate")) return Response.json({ data: { discountCodeAppCreate: { codeAppDiscount: { discountId: "discount-1" }, userErrors: [] } } });
+    if (body.query.includes("metafieldsSet")) return Response.json({ data: { metafieldsSet: { userErrors: [] } } });
+    return offerCatalogResponse(body);
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session", "456"), { method: "POST" }).then(r => r.json());
+  const controller = new AbortController();
+  const call = (route: string, data: unknown) => fetch(base + proxy(shop, route, "456"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data), signal: controller.signal });
+  let reply: any = {};
+  for (let round = 0; round < 4; round++) reply = await call("api/offers", { shopperToken: session.token, message: "Could you do $90? It is last season and I am buying today.", product: { handle: "sizes", selectedVariantId: "1" }, negotiationId: reply.negotiationId }).then(r => r.json());
+  const accepted = call("api/accept", { shopperToken: session.token, offerId: reply.card.offerId, negotiationId: reply.negotiationId });
+  await waiting;
+  const privacy = fetch(`${base}/webhooks`, { ...webhook(topic, shop, { customer: { id: 456 }, data_request: { id: 99 }, orders_to_redact: [], orders_requested: [] }), signal: controller.signal });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  release();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const responses = await Promise.race([Promise.all([accepted, privacy]).then(values => values.map(response => response.status)), new Promise(resolve => { timer = setTimeout(() => resolve("deadlocked"), 500); })]);
+    expect(responses).toEqual([200, 200]);
+  } finally { clearTimeout(timer); void accepted.catch(() => undefined); void privacy.catch(() => undefined); controller.abort(); }
 });

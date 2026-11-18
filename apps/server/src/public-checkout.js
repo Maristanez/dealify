@@ -41,7 +41,10 @@ export async function mintPublicDiscount({ store, shop, apiKey, graphql }, offer
   if (record?.status === "revoked") throw new Error("This offer is no longer available.");
   if (record?.settlement) return record.settlement;
   record ||= { id: offer.offerId, code, signature, expiresAt: offer.expiresAt.toISOString(), status: "creating" };
-  const save = () => store.set(shop, "checkout", offer.offerId, record, Date.now() + 90 * 86400000);
+  const save = () => {
+    store.set(shop, "checkout", offer.offerId, record, Date.now() + 90 * 86400000);
+    if (config.total < list) store.set(shop, "checkout-code", code, { offerId: offer.offerId }, Date.now() + 60 * 86400000);
+  };
   save();
   // At list price there is no promised discount or price hold. Shopify shows the current price.
   if (config.total < list) {
