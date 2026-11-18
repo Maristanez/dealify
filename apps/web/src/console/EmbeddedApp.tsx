@@ -32,6 +32,7 @@ export function EmbeddedApp() {
     <section className="paper" aria-label="Dealify setup" style={{ margin: "1rem", padding: "1rem" }}>
       <h2>Set up Dealify · Free pilot</h2>
       <p>Dealify negotiates merchandise prices within your rules. Payment, tax and shipping stay in Shopify Checkout. There is no app charge during this pilot.</p>
+      <p>This pilot supports CAD stores and ordinary one-time products with stock and a cost per item. Subscriptions, gift cards, transformed bundles and other presentment currencies are excluded.</p>
       <ol>
         <li>Review your products below. Add a cost per item in Shopify for every variant you want to offer. Products without costs stay at the listed price.</li>
         <li>Set your pricing rules and select Adopt. Stores start paused; select Resume when you are ready.</li>

@@ -14,7 +14,7 @@ import { publicConfig } from "./public-config.ts";
 import { randomUUID } from "node:crypto";
 
 
-export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb, accessToken } = {}) {
+export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb, accessToken, checkout, durableState } = {}) {
 const fetch = fetchImpl;
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://b8wzw0-h3.myshopify.com",
@@ -55,15 +55,19 @@ const backboard = env.BACKBOARD_API_KEY
 const allowedOrigins = getAllowedOrigins();
 const streamEpoch = randomUUID();
 const seedProducts = loadSeedProducts();
+const restored = durableState?.load() || {};
 const state = {
   token: null,
   tokenExpiresAt: 0,
   mirror: { loadedAt: 0, products: [], items: [], warnings: [], source: "empty" },
-  offers: new Map(),
-  negotiations: new Map(),
-  shopperContexts: new Map(),
+  offers: new Map((restored.offers || []).map(([id, offer]) => [id, { ...offer, expiresAt: new Date(offer.expiresAt) }])),
+  negotiations: new Map(restored.negotiations || []),
+  shopperContexts: new Map(restored.shopperContexts || []),
   locks: new Map(),
 };
+function persistRuntime() {
+  durableState?.save({ offers: [...state.offers], negotiations: [...state.negotiations], shopperContexts: [...state.shopperContexts], owner: owner?.snapshot() });
+}
 const db = ownerDb ?? (env.SUPABASE_URL && (env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY)
   ? createSupabaseDb({ environment: {
     url: env.SUPABASE_URL,
@@ -71,13 +75,14 @@ const db = ownerDb ?? (env.SUPABASE_URL && (env.SUPABASE_SECRET_KEY || env.SUPAB
   } }) : null);
 const owner = db ? await createOwnerRuntime({
   db,
+  snapshot: restored.owner,
   redteam: loadRedTeamResult(),
   onPaused: () => {
     for (const offer of state.offers.values()) {
       if (["live", "pending_owner"].includes(offer.status)) offer.status = "paused";
     }
   },
-  onApprovalResolved: approval => resolveShopperApproval(approval),
+  onApprovalResolved: approval => { resolveShopperApproval(approval); persistRuntime(); },
 }) : null;
 
 const server = createServer(async (request, response) => {
@@ -198,6 +203,10 @@ const server = createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/api/products") {
     try {
       const mirror = await syncMirror({ force: url.searchParams.get("sync") === "1" });
+      if (env.PUBLIC_APP === "true") {
+        sendJson(response, request, 200, { items: publicProducts(mirror).filter(product => product.handle === url.searchParams.get("handle")), currency: "CAD" });
+        return;
+      }
       sendJson(response, request, 200, {
         items: publicProducts(mirror),
         loadedAt: new Date(mirror.loadedAt).toISOString(),
@@ -206,6 +215,7 @@ const server = createServer(async (request, response) => {
       });
     } catch (error) {
       console.error("[api/products]", error);
+      if (env.PUBLIC_APP === "true") { sendJson(response, request, 503, { error: "catalog_unavailable", items: [], reply: "Offers are unavailable for this store right now." }); return; }
       sendJson(response, request, 503, { error: "shopify_unavailable", items: publicProducts(state.mirror), warnings: [error.message] });
     }
     return;
@@ -453,6 +463,10 @@ function sendCors(response, request) {
 }
 
 function sendJson(response, request, status, body) {
+  if (status < 400) {
+    try { persistRuntime(); }
+    catch { status = 503; body = { error: "persistence_unavailable", reply: "I could not save this request safely. Please retry shortly." }; }
+  }
   sendCors(response, request);
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
@@ -548,6 +562,7 @@ async function syncMirror({ force = false } = {}) {
   let after = null;
   do {
     const data = await shopifyGraphql(PRODUCTS_QUERY, { after });
+    if (env.PUBLIC_APP === "true" && data.shop?.currencyCode !== "CAD") throw new Error("The free pilot currently supports stores priced in CAD. Negotiated offers are unavailable in other currencies.");
     nodes.push(...data.products.nodes);
     if (!data.products.pageInfo?.hasNextPage) break;
     after = data.products.pageInfo.endCursor;
@@ -594,6 +609,7 @@ async function syncMirror({ force = false } = {}) {
 
 const PRODUCTS_QUERY = `#graphql
   query BazaarProducts($after: String) {
+    shop { currencyCode }
     products(first: 50, after: $after, query: "status:active") {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -601,6 +617,8 @@ const PRODUCTS_QUERY = `#graphql
         title
         handle
         productType
+        isGiftCard
+        requiresSellingPlan
         featuredMedia { preview { image { url } } }
         metafield(namespace: "bazaar", key: "stocked_at") { value }
         variants(first: 50) {
@@ -610,6 +628,7 @@ const PRODUCTS_QUERY = `#graphql
             title
             sku
             price
+            requiresComponents
             inventoryQuantity
             inventoryItem {
               tracked
@@ -628,7 +647,7 @@ const VARIANTS_QUERY = `#graphql
       variants(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id title sku price inventoryQuantity
+          id title sku price inventoryQuantity requiresComponents
           inventoryItem { tracked unitCost { amount currencyCode } }
         }
       }
@@ -641,7 +660,8 @@ function mapShopifyProduct(product) {
   const seed = seedProducts.find((entry) => entry.handle === product.handle || entry.title === product.title);
   const variants = (product.variants?.nodes || []).map((variant) => {
     const costAmount = variant.inventoryItem?.unitCost?.amount;
-    const unitCost = costAmount != null && Number.isFinite(Number(costAmount)) ? dollarsToCents(costAmount) : null;
+    const supported = env.PUBLIC_APP !== "true" || (!product.isGiftCard && !product.requiresSellingPlan && !variant.requiresComponents && variant.inventoryItem?.unitCost?.currencyCode === "CAD");
+    const unitCost = supported && costAmount != null && Number.isFinite(Number(costAmount)) ? dollarsToCents(costAmount) : null;
     return {
       gid: variant.id,
       numericId: gidTail(variant.id),
@@ -1039,7 +1059,7 @@ async function makeOfferTurn(payload, message) {
       { label: "My price", amount: offer.total, by: "shop" },
     ],
     expiresAt: expiresAt.toISOString(),
-    disclosure: ["You're talking to Trailhead Co's deal agent.", "Only this card is binding; chat text is not."],
+    disclosure: env.PUBLIC_APP === "true" ? ["Only this card is binding; chat text is not.", "Prices are in CAD. Tax and shipping are calculated in Shopify Checkout. Any negotiated discount requires these exact items and quantities before expiry."] : ["You're talking to Trailhead Co's deal agent.", "Only this card is binding; chat text is not."],
   };
   for (const previous of state.offers.values()) if (previous.negotiationId === negotiationId && previous.status === "live") previous.status = "superseded";
   const stored = { ...offer, line: replyLine, offerId, negotiationId, shopperId, expiresAt, status: "live", backboard: phrased.trace, card };
@@ -1125,6 +1145,7 @@ async function acceptOffer(offerId, payload) {
       deadline = setTimeout(() => reject(new Error("Shopify refresh timed out")), 1500);
     })]);
   } catch {
+    if (env.PUBLIC_APP === "true") throw new Error("I cannot verify current prices and costs right now. Please try again shortly.");
     if (state.mirror.source !== "shopify-admin" || Date.now() - state.mirror.loadedAt >= 120000) throw new Error("I cannot verify this offer right now. Please try again shortly.");
     mirror = state.mirror;
   } finally { clearTimeout(deadline); }
@@ -1140,7 +1161,19 @@ async function acceptOffer(offerId, payload) {
   }
   offer.items = freshItems;
   offer.listTotal = freshItems.reduce((sum, item) => sum + item.list * item.qty, 0);
-  const { discountId, ...settlement } = await mintDiscount(offer);
+  let minted;
+  try { minted = await mintDiscount(offer); }
+  catch (error) {
+    const currentPolicy = owner.getPolicy();
+    if (checkout && (currentPolicy.paused || !auditOffer(freshItems, offer.total, currentPolicy.floorPct, new Date(), offer.ownerApproved === true))) {
+      offer.status = currentPolicy.paused ? "paused" : "declined";
+      try { await checkout.revoke(offerId, shopifyGraphql); }
+      catch { console.error("[settlement] Uncertain discount revocation queued for retry."); }
+    }
+    if (env.PUBLIC_APP === "true") throw new Error("I could not finish this checkout safely. Please retry or request a fresh offer.");
+    throw error;
+  }
+  const { discountId, ...settlement } = minted;
 
   const postMintPolicy = owner.getPolicy();
   const postMintAudit = freshItems.every(Boolean)
@@ -1148,7 +1181,10 @@ async function acceptOffer(offerId, payload) {
     : null;
   if (postMintPolicy.paused || !postMintAudit) {
     offer.status = postMintPolicy.paused ? "paused" : "declined";
-    if (discountId) {
+    if (checkout) {
+      try { await checkout.revoke(offerId, shopifyGraphql); }
+      catch { console.error("[settlement] Discount revocation queued for retry."); }
+    } else if (discountId) {
       try {
         await shopifyGraphql("mutation RevokeOffer($id: ID!) { discountCodeDeactivate(id: $id) { userErrors { message } } }", { id: discountId });
       } catch {
@@ -1242,6 +1278,7 @@ const DISCOUNT_MUTATION = `#graphql
 `;
 
 async function mintDiscount(offer) {
+  if (checkout) return checkout.mint(offer, shopifyGraphql);
   if (offer.items.some((item) => String(item.variantId).startsWith("seed://"))) throw new Error("This offer came from the seed fallback, so I will not create a fake Shopify checkout.");
   const code = `TRAIL-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
   const discountAmount = Math.max(0, offer.listTotal - offer.total);
@@ -2037,13 +2074,23 @@ function publicPageOrNull(value) {
   return page || null;
 }
 
-server.on("close", () => owner?.dispose());
+let maintainingCheckout = false;
+const checkoutMaintenance = checkout ? setInterval(async () => {
+  if (maintainingCheckout) return;
+  maintainingCheckout = true;
+  try { await checkout.maintain(shopifyGraphql); }
+  catch { console.error("[settlement] Checkout maintenance will retry."); }
+  finally { maintainingCheckout = false; }
+}, 60000) : null;
+checkoutMaintenance?.unref();
+server.on("close", () => { clearInterval(checkoutMaintenance); owner?.dispose(); });
 server.deleteShopper = shopperId => withShopperLock(shopperId, async () => {
   state.shopperContexts.delete(shopperId);
   for (const [id, offer] of state.offers) if (offer.shopperId === shopperId) state.offers.delete(id);
   for (const [id, negotiation] of state.negotiations) if (negotiation.shopperId === shopperId) state.negotiations.delete(id);
   owner?.forgetShopper(shopperId);
   backboard?.forgetThreads(shopperId);
+  persistRuntime();
 });
 return server;
 }

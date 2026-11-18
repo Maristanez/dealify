@@ -34,7 +34,7 @@ export function storefrontProxy({ shopify, store, runtimes, env }) {
   });
   router.use(express.json({ limit: "24kb" }));
   router.use(async (request, response) => {
-    const allowed = ["/api/chat", "/api/offers", "/api/accept", "/api/offers/status", "/api/session/reset", "/api/session/delete"];
+    const allowed = ["/api/catalog", "/api/chat", "/api/offers", "/api/accept", "/api/offers/status", "/api/session/reset", "/api/session/delete"];
     if (request.method !== "POST" || !allowed.includes(request.path)) return response.status(404).json({ error: "not_found" });
     const shop = response.locals.shop;
     const payload = request.body;
@@ -42,11 +42,10 @@ export function storefrontProxy({ shopify, store, runtimes, env }) {
     const sessionId = hash(payload.shopperToken);
     const session = store.get(shop, "shopper", sessionId);
     if (!session || session.customerId !== response.locals.customerId) return response.status(401).json({ error: "shopper_session_expired" });
-    // Public checkout stays closed until the exact-basket Function is connected and verified.
-    if (request.path === "/api/accept") return response.status(503).json({ error: "checkout_not_ready", reply: "Negotiated checkout is not available yet. Please shop at the listed prices." });
+    if (!consume(shop, `requests:${session.id}`, 90, 60000)) return response.status(429).json({ error: "request_limit", reply: "Please wait a minute before trying again." });
     if (request.path === "/api/session/delete") {
-      store.remove(shop, "shopper", sessionId);
       await runtimes.deleteShopper(shop, session.id);
+      store.remove(shop, "shopper", sessionId);
       return response.json({ ok: true });
     }
     const isTurn = request.path === "/api/chat" || request.path === "/api/offers";
@@ -62,7 +61,10 @@ export function storefrontProxy({ shopify, store, runtimes, env }) {
     const { shopperToken: _token, ...body } = payload;
     request.bazaarPayload = { ...body, shopperId: session.id };
     request.headers.authorization = undefined;
-    if (request.path === "/api/offers/status") {
+    if (request.path === "/api/catalog") {
+      request.method = "GET";
+      request.url = `/api/products?${new URLSearchParams({ handle: String(payload.handle || "") })}`;
+    } else if (request.path === "/api/offers/status") {
       request.method = "GET";
       request.url = `/api/offers/${encodeURIComponent(String(payload.offerId || ""))}?${new URLSearchParams({ shopperId: session.id, negotiationId: String(payload.negotiationId || "") })}`;
     } else request.url = request.path;

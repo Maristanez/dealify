@@ -1,0 +1,97 @@
+{
+  "input": {
+    "cart": {
+      "lines": [
+        {
+          "id": "gid://shopify/CartLine/2",
+          "quantity": 1,
+          "sellingPlanAllocation": null,
+          "parentRelationship": null,
+          "merchandise": {
+            "__typename": "ProductVariant",
+            "id": "gid://shopify/ProductVariant/2"
+          },
+          "cost": {
+            "amountPerQuantity": {
+              "amount": "40.00",
+              "currencyCode": "CAD"
+            },
+            "subtotalAmount": {
+              "amount": "40.00",
+              "currencyCode": "CAD"
+            }
+          }
+        },
+        {
+          "id": "gid://shopify/CartLine/1",
+          "quantity": 1,
+          "sellingPlanAllocation": null,
+          "parentRelationship": null,
+          "merchandise": {
+            "__typename": "ProductVariant",
+            "id": "gid://shopify/ProductVariant/1"
+          },
+          "cost": {
+            "amountPerQuantity": {
+              "amount": "100.00",
+              "currencyCode": "CAD"
+            },
+            "subtotalAmount": {
+              "amount": "100.00",
+              "currencyCode": "CAD"
+            }
+          }
+        }
+      ]
+    },
+    "discount": {
+      "discountClasses": [
+        "ORDER"
+      ],
+      "metafield": {
+        "jsonValue": {
+          "currency": "CAD",
+          "total": 11000,
+          "lines": [
+            {
+              "variantId": "gid://shopify/ProductVariant/1",
+              "quantity": 1,
+              "unitPrice": 10000
+            },
+            {
+              "variantId": "gid://shopify/ProductVariant/2",
+              "quantity": 1,
+              "unitPrice": 4000
+            }
+          ]
+        }
+      }
+    }
+  },
+  "expectedOutput": {
+    "operations": [
+      {
+        "orderDiscountsAdd": {
+          "candidates": [
+            {
+              "message": "Dealify agreed offer",
+              "targets": [
+                {
+                  "orderSubtotal": {
+                    "excludedCartLineIds": []
+                  }
+                }
+              ],
+              "value": {
+                "fixedAmount": {
+                  "amount": "30.0"
+                }
+              }
+            }
+          ],
+          "selectionStrategy": "FIRST"
+        }
+      }
+    ]
+  }
+}

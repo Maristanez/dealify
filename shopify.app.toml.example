@@ -29,3 +29,9 @@ uri = "/webhooks"
 url = "/proxy"
 subpath = "dealify"
 prefix = "apps"
+
+[discount.metafields.app.offer]
+type = "json"
+name = "Agreed Dealify basket"
+access.admin = "merchant_read"
+access.storefront = "none"

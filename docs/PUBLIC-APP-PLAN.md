@@ -34,10 +34,18 @@ The user confirmed HTTP routes for installation, store isolation and webhooks; c
 - [ ] Merchant identity/support/privacy details and final listing materials confirmed.
 - [ ] Shopify submission and approval.
 
+## Completed locally in this checkpoint
+
+- [x] Exact-basket Shopify Function and repeat-safe discount minting.
+- [x] Persist offers, negotiation rounds and pending approvals through restarts.
+- [x] Product-page app embed with explicit acceptance and safe text rendering.
+- [x] Regression tests for cold-start deletion, unknown mint invalidation and checkout-link recovery.
+- [x] Independent standards/spec review and fixes for this checkpoint.
+
 ## Current status
 
-Baseline: commit 7356f3a394cd7b0f5113b541bfbbfcfc028e4413; 595 tests passed. Foundation checkpoint after review fixes: 608 tests pass, workspace typechecks and Console build pass. Shopify app configuration validates. See research/shopify-approval-2026-11.md for current official requirements and research/backboard-public-privacy.md for AI lifecycle requirements.
+Baseline: commit 7356f3a394cd7b0f5113b541bfbbfcfc028e4413; 595 tests passed. Current checkpoint: 622 tests pass, workspace typechecks and Console build pass. Shopify app configuration validates. See research/shopify-approval-2026-11.md for current official requirements and research/backboard-public-privacy.md for AI lifecycle requirements.
 
-Implemented foundation: official Shopify token exchange with expiring encrypted offline sessions; separate shop settings/policies/catalog runtimes; signed storefront proxy sessions; verified privacy/uninstall webhook handlers; App Bridge Console shell; product and variant pagination. Public checkout is deliberately unavailable until the exact-basket Function is integrated. AI, durable negotiations, order reconciliation, privacy/support pages, portable widget, operations, live checks and final approval review are unfinished.
+Implemented foundation: official Shopify token exchange with expiring encrypted offline sessions; separate shop settings/policies/catalog runtimes; signed storefront proxy sessions; verified privacy/uninstall webhook handlers; App Bridge Console shell; product and variant pagination. The exact-basket Discount Function and signed theme embed are now connected to public checkout. Negotiations and owner approvals persist across restarts. Checkout intents recover uncertain creation/configuration responses, and post-mint invalidation queues deactivation retries. AI, order reconciliation, full privacy/retention lifecycle, privacy/support pages, operations, live checks and final approval review are unfinished. The business name is Dealify; support email is pending.
 
-The user identified development store b8wzw0-h3 and organization Shop. A new Dealify pilot app was registered there (client ID eab522082646d25b2a9d9def3bfee14b). Its local URL is a development placeholder; no production deployment or merchant installation is claimed. CLI-generated extension scaffolds are in progress and are not release evidence.
+The user identified development store b8wzw0-h3 and organization Shop. A new Dealify pilot app was registered there (client ID eab522082646d25b2a9d9def3bfee14b). Its local URL is a development placeholder; no production deployment or merchant installation is claimed. Extensions pass local behavior/configuration checks; development-store installation and payment remain unverified. The user reports Railway is unavailable; no provider-wide outage has been established.

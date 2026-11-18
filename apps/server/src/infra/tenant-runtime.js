@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createBazaarServer } from "../application.js";
+import { mintPublicDiscount, revokePublicDiscount, retryPublicRevocations } from "../public-checkout.js";
 
 /** Each runtime owns one shop; all durable reads and writes are scoped here. */
 export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
@@ -33,6 +34,15 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
       },
       fetchImpl,
       accessToken: () => sessions.accessToken(shop),
+      checkout: {
+        mint: (offer, graphql) => mintPublicDiscount({ store, shop, apiKey: env.SHOPIFY_API_KEY, graphql }, offer),
+        revoke: (offerId, graphql) => revokePublicDiscount({ store, shop, apiKey: env.SHOPIFY_API_KEY, graphql }, offerId),
+        maintain: graphql => retryPublicRevocations({ store, shop, apiKey: env.SHOPIFY_API_KEY, graphql }),
+      },
+      durableState: {
+        load: () => store.get(shop, "runtime"),
+        save: snapshot => store.set(shop, "runtime", "current", snapshot, Date.now() + 86400000),
+      },
     });
     return { server, internalToken };
   }
@@ -50,8 +60,8 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
       if (pending) (await pending).server.emit("close");
     },
     async deleteShopper(shop, shopperId) {
-      const pending = instances.get(shop);
-      if (pending) await (await pending).server.deleteShopper(shopperId);
+      const runtime = await this.get(shop);
+      await runtime.server.deleteShopper(shopperId);
     },
     async close() { await Promise.all([...instances.keys()].map(shop => this.remove(shop))); },
   };

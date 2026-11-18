@@ -1,0 +1,7 @@
+{
+  "dealify": {
+    "name": "Dealify shopkeeper",
+    "proxy": "App proxy path",
+    "proxy_info": "Use the path configured for Dealify in Shopify. The default is /apps/dealify."
+  }
+}
