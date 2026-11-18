@@ -36,7 +36,7 @@ The user confirmed HTTP routes for installation, store isolation and webhooks; c
 
 ## Current status
 
-Baseline: commit 7356f3a394cd7b0f5113b541bfbbfcfc028e4413; 595 tests passed. Foundation checkpoint: 604 tests pass, workspace typechecks and Console build pass. Shopify app configuration validates. See research/shopify-approval-2026-11.md for current official requirements and research/backboard-public-privacy.md for AI lifecycle requirements.
+Baseline: commit 7356f3a394cd7b0f5113b541bfbbfcfc028e4413; 595 tests passed. Foundation checkpoint after review fixes: 608 tests pass, workspace typechecks and Console build pass. Shopify app configuration validates. See research/shopify-approval-2026-11.md for current official requirements and research/backboard-public-privacy.md for AI lifecycle requirements.
 
 Implemented foundation: official Shopify token exchange with expiring encrypted offline sessions; separate shop settings/policies/catalog runtimes; signed storefront proxy sessions; verified privacy/uninstall webhook handlers; App Bridge Console shell; product and variant pagination. Public checkout is deliberately unavailable until the exact-basket Function is integrated. AI, durable negotiations, order reconciliation, privacy/support pages, portable widget, operations, live checks and final approval review are unfinished.
 

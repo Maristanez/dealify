@@ -19,6 +19,7 @@ function webhook(topic: string, shop: string, body: unknown, valid = true) {
   return { method: "POST", headers: {
     "Content-Type": "application/json", "X-Shopify-Topic": topic, "X-Shopify-Shop-Domain": shop,
     "X-Shopify-API-Version": "2026-10", "X-Shopify-Webhook-Id": `${topic}-${shop}`,
+    "X-Shopify-Triggered-At": new Date().toISOString(),
     "X-Shopify-Hmac-Sha256": valid ? createHmac("sha256", env.SHOPIFY_API_SECRET).update(text).digest("base64") : "invalid",
   }, body: text };
 }
@@ -53,6 +54,51 @@ afterEach(async () => {
     server.closeAllConnections(); server.close(() => resolve());
   })));
   for (const cleanup of cleanups.splice(0)) await cleanup();
+});
+
+it("does not let an old uninstall retry disable a fresh installation", async () => {
+  const { base } = await start();
+  const shop = "first.myshopify.com";
+  const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/app`, { headers });
+  const uninstall = webhook("app/uninstalled", shop, {});
+  expect((await fetch(`${base}/webhooks`, uninstall)).status).toBe(200);
+  await fetch(`${base}/api/app`, { headers });
+  await fetch(`${base}/webhooks`, uninstall);
+  expect((await fetch(base + proxy(shop, "session"), { method: "POST" })).status).toBe(200);
+});
+
+it("ignores a delayed uninstall or shop redaction from before the current installation", async () => {
+  const { base } = await start();
+  const shop = "first.myshopify.com";
+  const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+  await fetch(`${base}/api/app/settings`, { method: "POST", headers, body: JSON.stringify({ shopName: "Reinstalled", policyText: "Fresh policy" }) });
+  for (const topic of ["app/uninstalled", "shop/redact"]) {
+    const delayed = webhook(topic, shop, {});
+    delayed.headers["X-Shopify-Triggered-At"] = new Date(Date.now() - 86400000).toISOString();
+    expect((await fetch(`${base}/webhooks`, delayed)).status).toBe(200);
+  }
+  expect((await fetch(base + proxy(shop, "session"), { method: "POST" })).status).toBe(200);
+  expect((await fetch(`${base}/api/app`, { headers }).then(r => r.json())).settings.shopName).toBe("Reinstalled");
+});
+
+it("shares one offline credential refresh across simultaneous shoppers", async () => {
+  let refreshes = 0;
+  const { base } = await start({}, async (input, init) => {
+    if (String(input).includes("graphql")) return Response.json({ data: { products: { nodes: [] } } });
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type === "refresh_token") {
+      refreshes++;
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return Response.json({ access_token: "fresh-token", expires_in: 3600, refresh_token: "rotated-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    }
+    return Response.json({ access_token: "old-token", expires_in: 1, refresh_token: "initial-refresh", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const sessions = await Promise.all([1, 2].map(() => fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json())));
+  await Promise.all(sessions.map(session => fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "Hello" }) })));
+  expect(refreshes).toBe(1);
 });
 
 it("retains shop settings across an application restart", async () => {
@@ -159,6 +205,26 @@ it("loads every variant of a product before offering it", async () => {
   });
   const state = await fetch(`${base}/api/console/state`, { headers: { Authorization: `Bearer ${token("first.myshopify.com")}` } }).then(r => r.json());
   expect(state.products[0].variants.map((item: { size: string }) => item.size)).toEqual(["Size 1", "Size 2"]);
+});
+
+it("deleting one shopper preserves another shopper's live offer", async () => {
+  const { base } = await start({}, async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const a = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const b = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, body: unknown) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const offer = await call("api/offers", { shopperToken: b.token, message: "Could you do $90? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" }, productContextSource: "current" }).then(r => r.json());
+  expect(offer.card?.status).toBe("live");
+  expect((await call("api/session/delete", { shopperToken: a.token })).status).toBe(200);
+  const status = await call("api/offers/status", { shopperToken: b.token, offerId: offer.card.offerId, negotiationId: offer.negotiationId });
+  expect(status.status).toBe(200);
+  expect((await status.json()).card).toEqual(offer.card);
+  expect((await call("api/offers/status", { shopperToken: a.token, offerId: offer.card.offerId, negotiationId: offer.negotiationId })).status).toBe(401);
 });
 
 it("does not expose merchant data without a verified Shopify identity", async () => {

@@ -2038,5 +2038,12 @@ function publicPageOrNull(value) {
 }
 
 server.on("close", () => owner?.dispose());
+server.deleteShopper = shopperId => withShopperLock(shopperId, async () => {
+  state.shopperContexts.delete(shopperId);
+  for (const [id, offer] of state.offers) if (offer.shopperId === shopperId) state.offers.delete(id);
+  for (const [id, negotiation] of state.negotiations) if (negotiation.shopperId === shopperId) state.negotiations.delete(id);
+  owner?.forgetShopper(shopperId);
+  backboard?.forgetThreads(shopperId);
+});
 return server;
 }

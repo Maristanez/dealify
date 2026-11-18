@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createBazaarServer } from "../application.js";
 
 /** Each runtime owns one shop; all durable reads and writes are scoped here. */
-export function tenantRuntimes({ store, shopify, env, fetchImpl }) {
+export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
   const instances = new Map();
   async function create(shop) {
     const internalToken = `Bearer ${randomUUID()}`;
@@ -32,11 +32,7 @@ export function tenantRuntimes({ store, shopify, env, fetchImpl }) {
         BACKBOARD_API_KEY: undefined, ELEVENLABS_API_KEY: undefined,
       },
       fetchImpl,
-      accessToken: async () => {
-        const session = await shopify.ensureValidOfflineSession(shop);
-        if (!session?.accessToken || !store.get(shop, "installation")?.active) throw new Error("Store installation is unavailable");
-        return session.accessToken;
-      },
+      accessToken: () => sessions.accessToken(shop),
     });
     return { server, internalToken };
   }
@@ -52,6 +48,10 @@ export function tenantRuntimes({ store, shopify, env, fetchImpl }) {
       const pending = instances.get(shop);
       instances.delete(shop);
       if (pending) (await pending).server.emit("close");
+    },
+    async deleteShopper(shop, shopperId) {
+      const pending = instances.get(shop);
+      if (pending) await (await pending).server.deleteShopper(shopperId);
     },
     async close() { await Promise.all([...instances.keys()].map(shop => this.remove(shop))); },
   };

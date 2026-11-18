@@ -32,6 +32,7 @@ export type OwnerRuntime = {
   pendingApprovals(): Approval[];
   requestApproval(input: ApprovalRequest): Approval;
   resolveApproval(id: string, decision: "approve" | "decline"): Promise<Approval>;
+  forgetShopper(shopperId: string): void;
   dispose(): void;
 };
 
@@ -302,6 +303,16 @@ export async function createOwnerRuntime(options: {
         return Promise.reject(new TypeError("Approval decision must be approve or decline"));
       }
       return resolveTerminal(id, decision === "approve" ? "approved" : "declined");
+    },
+    forgetShopper: shopperId => {
+      for (const [id, record] of approvals) {
+        if (record.shopperId !== shopperId) continue;
+        clearTimeout(approvalTimers.get(id));
+        approvalTimers.delete(id);
+        askedNegotiations.delete(record.approval.negotiationId);
+        approvals.delete(id);
+      }
+      for (let index = feed.length - 1; index >= 0; index--) if (feed[index]?.event.shopperId === shopperId) feed.splice(index, 1);
     },
     dispose: () => {
       for (const timer of approvalTimers.values()) clearTimeout(timer);

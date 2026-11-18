@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createPublicStore } from "./infra/public-store.js";
 import { tenantRuntimes } from "./infra/tenant-runtime.js";
 import { storefrontProxy } from "./storefront-proxy.js";
+import { shopifySessions } from "./infra/shopify-sessions.js";
 // Express exposes its CommonJS entry point; share its SDK runtime when injecting transport.
 const { setAbstractFetchFunc } = createRequire(import.meta.url)("@shopify/shopify-api/runtime");
 
@@ -33,12 +34,10 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     webhooks: { path: "/webhooks" },
     future: { tokenExchange: true, expiringOfflineAccessTokens: true },
     sessionStorage: store.sessionStorage,
-    hooks: { afterAuth: ({ session }) => {
-      store.set(session.shop, "installation", "current", { active: true, installedAt: new Date().toISOString() });
-    } },
   });
   const app = express();
-  const runtimes = tenantRuntimes({ store, shopify, env, fetchImpl });
+  const sessions = shopifySessions({ shopify, store });
+  const runtimes = tenantRuntimes({ store, sessions, env, fetchImpl });
   app.disable("x-powered-by");
   app.use((request, response, next) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
@@ -51,8 +50,21 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     if (!validation.valid) return response.status(401).json({ error: "invalid_webhook" });
     const shop = validation.domain;
     if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop)) return response.status(400).json({ error: "invalid_shop" });
+    return sessions.exclusive(shop, async () => {
+    const eventId = String(validation.webhookId || "");
+    if (!eventId || eventId.length > 200) return response.status(400).json({ error: "invalid_webhook_id" });
+    if (store.get(shop, "webhook", eventId)) return response.json({ ok: true });
     let payload;
     try { payload = JSON.parse(rawBody); } catch { return response.status(400).json({ error: "invalid_json" }); }
+    if (["SHOP_REDACT", "APP_UNINSTALLED"].includes(validation.topic)) {
+      const triggeredAt = Date.parse(request.get("X-Shopify-Triggered-At") || "");
+      const installation = store.get(shop, "installation");
+      if (!Number.isFinite(triggeredAt)) return response.status(400).json({ error: "webhook_timestamp_required" });
+      if (installation?.active && triggeredAt < Date.parse(installation.installedAt)) {
+        store.set(shop, "webhook", eventId, { processed: true }, Date.now() + 7 * 86400000);
+        return response.json({ ok: true });
+      }
+    }
     if (validation.topic === "SHOP_REDACT") {
       await runtimes.remove(shop);
       store.removeShop(shop);
@@ -79,14 +91,17 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
         data, note: "Provide this export to the requesting customer using the merchant's verified contact process. The app stores no customer names, email addresses or payment details.",
       }, Date.now() + 30 * 86400000);
     } else return response.status(400).json({ error: "unsupported_topic" });
+    // Keep only a short-lived receipt, never the customer-bearing webhook body.
+    store.set(shop, "webhook", eventId, { processed: true }, Date.now() + 7 * 86400000);
     response.status(200).json({ ok: true });
+    });
   });
   app.use("/proxy", storefrontProxy({ shopify, store, runtimes, env }));
   app.use("/api", (request, response, next) => {
     response.setHeader("Cache-Control", "no-store");
     if (!request.headers.authorization?.startsWith("Bearer ")) return response.status(401).json({ error: "shopify_authentication_required" });
     next();
-  }, shopify.validateAuthenticatedSession());
+  }, sessions.authenticate);
   app.get("/api/app", (request, response) => {
     const shop = response.locals.shopify.session.shop;
     response.json({ shop, settings: store.get(shop, "settings") || { shopName: "", policyText: "" }, free: true,

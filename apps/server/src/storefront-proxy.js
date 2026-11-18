@@ -46,9 +46,7 @@ export function storefrontProxy({ shopify, store, runtimes, env }) {
     if (request.path === "/api/accept") return response.status(503).json({ error: "checkout_not_ready", reply: "Negotiated checkout is not available yet. Please shop at the listed prices." });
     if (request.path === "/api/session/delete") {
       store.remove(shop, "shopper", sessionId);
-      // Reset this store's volatile conversations, including the requested session, without retaining transcripts.
-      await runtimes.remove(shop);
-      store.removeKind(shop, "runtime");
+      await runtimes.deleteShopper(shop, session.id);
       return response.json({ ok: true });
     }
     const isTurn = request.path === "/api/chat" || request.path === "/api/offers";

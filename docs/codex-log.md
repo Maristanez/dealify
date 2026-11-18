@@ -331,3 +331,5 @@
 **Evidence:** 604 tests across 58 files, workspace typechecks, and production Console build pass at the foundation checkpoint. Shopify configuration validates. New HTTP tests cover identity, shop isolation, persistence, HMAC rejection, proxy sessions, embedding, and catalog pagination.
 
 **Open gates:** Exact-basket checkout, durable negotiations, paid/refund reconciliation, external AI deletion, merchant privacy/support details, extension implementation, operations, development-store testing, listing and Shopify review. This is a draft foundation, not a launch-ready app or approval claim.
+
+**Foundation review follow-up:** Independent standards/spec reviews found shopper deletion clearing other sessions, concurrent token rotation, and replayed/delayed uninstall events disrupting reinstalls. Added targeted shopper erasure, coordinated Shopify credential/lifecycle operations, webhook receipts and installation-age checks. All 608 tests pass; server typecheck passes. The embedded-UI validator was attempted but its bundled TypeScript/type-index dependencies are incomplete; local TypeScript/build checks pass, and live embedding still needs verification.
