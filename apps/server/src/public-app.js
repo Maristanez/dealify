@@ -9,6 +9,7 @@ import { tenantRuntimes } from "./infra/tenant-runtime.js";
 import { storefrontProxy } from "./storefront-proxy.js";
 import { shopifySessions } from "./infra/shopify-sessions.js";
 import { orderLedger } from "./order-ledger.js";
+import { publicAi } from "./public-ai.js";
 // Express exposes its CommonJS entry point; share its SDK runtime when injecting transport.
 const { setAbstractFetchFunc } = createRequire(import.meta.url)("@shopify/shopify-api/runtime");
 
@@ -39,11 +40,12 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
   const app = express();
   const sessions = shopifySessions({ shopify, store });
   const orders = orderLedger({ store, sessions, fetchImpl });
-  const runtimes = tenantRuntimes({ store, sessions, env, fetchImpl });
+  const ai = publicAi({ store, env, fetchImpl });
+  const runtimes = tenantRuntimes({ store, sessions, env, fetchImpl, ai });
   let retentionRun;
   function maintainRetention() {
     if (retentionRun) return retentionRun;
-    retentionRun = runtimes.prune().then(() => store.prune()).catch(() => {
+    retentionRun = runtimes.prune().then(() => store.prune()).then(() => ai.maintain()).catch(() => {
       console.error("[retention] Cleanup will retry.");
     }).finally(() => { retentionRun = undefined; });
     return retentionRun;
@@ -135,7 +137,7 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     return ["SHOP_REDACT", "APP_UNINSTALLED", "APP_SCOPES_UPDATE"].includes(validation.topic) ? sessions.exclusive(shop, handle) : handle();
     });
   });
-  app.use("/proxy", storefrontProxy({ shopify, store, runtimes, env }));
+  app.use("/proxy", storefrontProxy({ shopify, store, runtimes, env, ai }));
   app.use("/api", (request, response, next) => {
     response.setHeader("Cache-Control", "no-store");
     if (!request.headers.authorization?.startsWith("Bearer ")) return response.status(401).json({ error: "shopify_authentication_required" });
@@ -146,6 +148,7 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     response.json({ shop, settings: store.get(shop, "settings") || { shopName: "", policyText: "" }, free: true,
       embedUrl: `https://${shop}/admin/themes/current/editor?context=apps&template=product&activateAppId=${encodeURIComponent(env.SHOPIFY_API_KEY)}/dealify`,
       supportEmail: env.SUPPORT_EMAIL || null,
+      ai: { enabled: ai.enabled, provider: ai.enabled ? env.BACKBOARD_MODEL_PROVIDER : null },
     });
   });
   app.get("/api/app/privacy-requests", (_request, response) => response.json({ requests: store.list(response.locals.shopify.session.shop, "privacy-request") }));
@@ -190,5 +193,5 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     const status = error.type === "entity.too.large" ? 413 : error.type === "entity.parse.failed" ? 400 : 503;
     response.status(status).json({ error: status === 503 ? "temporarily_unavailable" : "invalid_request" });
   });
-  return { app, shopify, close: async () => { clearInterval(retention); await retentionRun; await orders.close(); await runtimes.close(); store.close(); } };
+  return { app, shopify, close: async () => { clearInterval(retention); await retentionRun; await orders.close(); await runtimes.close(); await ai.close(); store.close(); } };
 }

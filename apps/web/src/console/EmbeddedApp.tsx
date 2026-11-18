@@ -5,7 +5,7 @@ import { createHttpPort } from "./data/httpPort";
 declare global { interface Window { shopify: { idToken(): Promise<string> } } }
 type Settings = { shopName: string; policyText: string };
 type Reporting = { currency: string; days: number; paidOrders: number; received: number; refunded: number; net: number; cancelledOrders: number; testOrders: number; pending: number; syncFailed: boolean; lastReconciledAt: string | null };
-type AppInfo = { shop: string; settings: Settings; embedUrl: string; supportEmail: string | null };
+type AppInfo = { shop: string; settings: Settings; embedUrl: string; supportEmail: string | null; ai: { enabled: boolean; provider: string | null } };
 
 async function appRequest(path: string, body?: unknown) {
   const token = await window.shopify.idToken();
@@ -51,6 +51,7 @@ export function EmbeddedApp() {
       <h2>Set up Dealify · Free pilot</h2>
       <p>Dealify negotiates merchandise prices within your rules. Payment, tax and shipping stay in Shopify Checkout. There is no app charge during this pilot.</p>
       <p>This pilot supports CAD stores and ordinary one-time products with stock and a cost per item. Subscriptions, gift cards, transformed bundles and other presentment currencies are excluded.</p>
+      <p>{info.ai?.enabled ? `AI chat is enabled through Backboard and ${info.ai.provider}. Shopper messages, public product details and the store policies below are sent for processing. Temporary conversations are deleted after each model call; failed deletion requests are retried. AI answers can be wrong. Review your public policies and privacy notice before enabling the widget.` : "AI chat is not enabled. Offers use the pricing rules and standard replies until provider setup and data handling review are complete."}</p>
       <ol>
         <li>Review your products below. Add a cost per item in Shopify for every variant you want to offer. Products without costs stay at the listed price.</li>
         <li>Set your pricing rules and select Adopt. Stores start paused; select Resume when you are ready.</li>
@@ -59,7 +60,8 @@ export function EmbeddedApp() {
       <details><summary>Store information and privacy requests</summary>
         <form onSubmit={event => void save(event)}>
           <p><label>Store display name <input value={settings.shopName} maxLength={100} onChange={event => setSettings({ ...settings, shopName: event.target.value })} /></label></p>
-          <p><label>Store policies <textarea value={settings.policyText} maxLength={12000} rows={5} onChange={event => setSettings({ ...settings, policyText: event.target.value })} /></label></p>
+          <p><label>Public store policies <textarea value={settings.policyText} maxLength={12000} rows={5} onChange={event => setSettings({ ...settings, policyText: event.target.value })} /></label></p>
+          <p>Include only policies you want shoppers to see. Do not enter credentials, customer records, supplier information or private pricing rules.</p>
           <button disabled={saving}>{saving ? "Saving…" : "Save store details"}</button>
         </form>
         <p><button onClick={() => void appRequest("/api/app/privacy-requests").then(value => setRequests(value.requests)).catch(error => setMessage(error.message))}>View customer data requests</button></p>

@@ -3,7 +3,7 @@ import { createBazaarServer } from "../application.js";
 import { mintPublicDiscount, revokePublicDiscount, retryPublicRevocations } from "../public-checkout.js";
 
 /** Each runtime owns one shop; all durable reads and writes are scoped here. */
-export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
+export function tenantRuntimes({ store, sessions, env, fetchImpl, ai }) {
   const instances = new Map();
   async function create(shop) {
     let active = true;
@@ -14,6 +14,7 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
       return store.set(...args);
     } };
     const internalToken = `Bearer ${randomUUID()}`;
+    const shopAi = ai.forShop(shop);
     const db = {
       merchantId: shop,
       async loadLatestPolicy() {
@@ -40,6 +41,7 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
         BACKBOARD_API_KEY: undefined, ELEVENLABS_API_KEY: undefined,
       },
       fetchImpl,
+      aiClient: shopAi?.client,
       accessToken: () => sessions.accessToken(shop),
       checkout: {
         mint: (offer, graphql) => mintPublicDiscount({ store: runtimeStore, shop, apiKey: env.SHOPIFY_API_KEY, graphql }, offer),
@@ -53,7 +55,7 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
       },
     });
     server.on("close", () => { active = false; });
-    return { server, internalToken };
+    return { server, internalToken, shopAi };
   }
   return {
     async get(shop) {
@@ -64,12 +66,14 @@ export function tenantRuntimes({ store, sessions, env, fetchImpl }) {
       return instances.get(shop);
     },
     async remove(shop) {
+      await ai.eraseShop(shop);
       const pending = instances.get(shop);
       instances.delete(shop);
       if (pending) (await pending).server.emit("close");
     },
     async deleteShopper(shop, shopperId) {
       const runtime = await this.get(shop);
+      await runtime.shopAi?.eraseShopper(shopperId);
       await runtime.server.deleteShopper(shopperId);
       for (const { id, value } of store.entries(shop, "privacy-request")) {
         if (!value.shopperData?.some(session => session.sessionId === shopperId)) continue;

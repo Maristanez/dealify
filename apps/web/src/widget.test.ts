@@ -28,6 +28,21 @@ it("loads only when opened and treats shopper-facing replies as text", async () 
   expect(JSON.parse(String(request.mock.calls.at(-1)![1]?.body || "{}"))).toMatchObject({ shopperToken: "shopper-token", product: { handle: "tee", selectedVariantId: "1" } });
 });
 
+it("discloses AI processing before enabling the message form", async () => {
+  vi.stubGlobal("fetch", async (url: string) => url.endsWith("/session")
+    ? Response.json({ token: "t", aiEnabled: true, aiProvider: "openai" })
+    : Response.json({ items: [{ handle: "tee", variants: [{ id: "1", title: "Small" }] }] }));
+  const widget = document.createElement("dealify-shopkeeper");
+  Object.assign(widget.dataset, { proxy: "/apps/dealify", handle: "tee", shop: "test.myshopify.com" });
+  document.body.append(widget);
+  const root = widget.shadowRoot!;
+  root.querySelector<HTMLButtonElement>("[data-open]")!.click();
+  await waitFor(() => expect(root.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false));
+  expect(root.querySelector("[data-ai-notice]")?.textContent).toContain("Backboard");
+  expect(root.querySelector("[data-ai-notice]")?.textContent).toContain("openai");
+  expect(root.querySelector("[data-ai-notice]")?.textContent).toContain("personal or payment information");
+});
+
 it("shows the exact basket, accepts explicitly, and only links to the store's checkout", async () => {
   const card = { offerId: "offer-1", negotiationId: "round-1", status: "live", expiresAt: new Date(Date.now() + 900000).toISOString(), option: { total: 7500, listTotal: 10000, items: [{ variantId: "1", title: "Tee", size: "Small", qty: 2 }] } };
   const request = vi.fn(async (url: string, _init?: RequestInit) => {

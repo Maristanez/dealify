@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 
-export function storefrontProxy({ shopify, store, runtimes, env }) {
+export function storefrontProxy({ shopify, store, runtimes, env, ai }) {
   const router = express.Router();
   function consume(shop, id, limit, windowMs) {
     const current = store.get(shop, "budget", id) || { count: 0, until: Date.now() + windowMs };
@@ -30,7 +30,7 @@ export function storefrontProxy({ shopify, store, runtimes, env }) {
     const token = randomBytes(32).toString("base64url");
     const session = { id: randomUUID(), customerId: response.locals.customerId, expires: Date.now() + 86400000 };
     store.set(shop, "shopper", hash(token), session, session.expires);
-    response.json({ token, expiresAt: new Date(session.expires).toISOString() });
+    response.json({ token, expiresAt: new Date(session.expires).toISOString(), aiEnabled: ai.enabled, aiProvider: ai.enabled ? env.BACKBOARD_MODEL_PROVIDER : null });
   });
   router.use(express.json({ limit: "24kb" }));
   router.use(async (request, response) => {

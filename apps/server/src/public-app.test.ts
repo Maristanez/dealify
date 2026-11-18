@@ -56,6 +56,176 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
+const aiEnv = {
+  PUBLIC_AI_ENABLED: "true", BACKBOARD_API_KEY: "provider-test-key",
+  BACKBOARD_MODEL_PROVIDER: "openai", BACKBOARD_MODEL_NAME: "test-model",
+  BACKBOARD_TERMS_REVIEWED_AT: "2026-11-18", BACKBOARD_PROVIDER_TERMS_URL: "https://example.com/provider-terms",
+};
+
+it("answers with the current merchant's public policy and deletes isolated AI conversations", async () => {
+  const requests: Array<{ url: string; method: string; body: any }> = [];
+  let resource = 0;
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), method = init?.method || "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      requests.push({ url, method, body });
+      if (method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: `assistant-${++resource}` });
+      if (/\/assistants\/[^/]+\/threads$/.test(url)) return Response.json({ thread_id: `thread-${++resource}` });
+      if (url.endsWith("/threads/messages")) return new Response(`data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: body.thread_id, assistant_id: body.assistant_id, content: "Returns are accepted within fourteen days." })}\n\n`);
+      throw new Error("Unexpected provider request");
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  for (const [index, shop] of ["first.myshopify.com", "second.myshopify.com"].entries()) {
+    const headers = { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" };
+    await fetch(`${base}/api/app/settings`, { method: "POST", headers, body: JSON.stringify({ shopName: `Store ${index}`, policyText: `Returns within fourteen days. Policy marker ${index}.` }) });
+    await fetch(`${base}/api/pause`, { method: "POST", headers, body: JSON.stringify({ paused: false }) });
+    const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+    const answer = await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?", product: { handle: "invented", price: "$1", privateNotes: "untrusted-payload-marker" } }) }).then(r => r.json());
+    expect(answer.reply).toBe("Returns are accepted within fourteen days.");
+  }
+  const messages = requests.filter(request => request.url.endsWith("/threads/messages"));
+  expect(messages).toHaveLength(2);
+  for (const [index, message] of messages.entries()) {
+    expect(message.body).toMatchObject({ memory: "off", memory_response_citation: false, web_search: "off", tools: [] });
+    expect(message.body.content).toContain(`Policy marker ${index}`);
+    expect(message.body.content).not.toContain(`Policy marker ${1 - index}`);
+    expect(message.body.content).not.toContain("untrusted-payload-marker");
+    expect(message.body.system_prompt).not.toMatch(/Jarvis|Trailhead/);
+    expect(requests.some(request => request.method === "DELETE" && request.url.endsWith(`/threads/${message.body.thread_id}`))).toBe(true);
+    expect(requests.some(request => request.method === "DELETE" && request.url.endsWith(`/assistants/${message.body.assistant_id}`))).toBe(true);
+  }
+  expect(messages[0]?.body.assistant_id).not.toBe(messages[1]?.body.assistant_id);
+});
+
+it("deleting a shopper aborts AI processing and prevents later calls from the interrupted offer", async () => {
+  let started!: () => void;
+  const processing = new Promise<void>(resolve => { started = resolve; });
+  let modelCalls = 0;
+  let aborted = false;
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (/\/assistants\/[^/]+\/threads$/.test(url)) return Response.json({ thread_id: "thread" });
+      if (url.endsWith("/threads/messages")) {
+        modelCalls++;
+        if (modelCalls === 1) return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => { aborted = true; reject(new Error("Cancelled")); }, { once: true });
+          started();
+        });
+        return new Response("unwanted later model call", { status: 503 });
+      }
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [{ id: "gid://shopify/Product/1", title: "Every size", handle: "sizes", variants: { nodes: [{ id: "gid://shopify/ProductVariant/1", title: "Default Title", price: "100.00", inventoryQuantity: 10, inventoryItem: { unitCost: { amount: "40.00", currencyCode: "CAD" } } }] } }] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const call = (route: string, body: unknown) => fetch(base + proxy(shop, route), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, ...body as object }) });
+  const offer = call("api/offers", { message: "Could you do $90? I am buying today.", product: { handle: "sizes", selectedVariantId: "1" } });
+  await processing;
+  expect((await call("api/session/delete", {})).status).toBe(200);
+  await offer;
+  expect(aborted).toBe(true);
+  expect(modelCalls).toBe(1);
+});
+
+it("cancels a timed-out AI run before deletion and retries failed erasure after uninstall and restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-ai-test-"));
+  const config = { ...aiEnv, DATABASE_PATH: join(directory, "app.sqlite"), BACKBOARD_TIMEOUT_MS: "100" };
+  const effects: string[] = [];
+  let deletingFails = true;
+  const boundary: typeof fetch = async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE" || url.endsWith("/cancel")) {
+        effects.push(`${init?.method} ${new URL(url).pathname}`);
+        return new Response("", { status: deletingFails && init?.method === "DELETE" ? 503 : 200 });
+      }
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/assistants/assistant/threads")) return Response.json({ thread_id: "thread" });
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "run_started", run_id: "run", thread_id: "thread", assistant_id: "assistant" })}\n\n`));
+        init?.signal?.addEventListener("abort", () => controller.error(new Error("Timeout")), { once: true });
+      } }));
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  };
+  const first = await start(config, boundary);
+  const shop = "first.myshopify.com";
+  await fetch(`${first.base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(first.base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const response = await fetch(first.base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  expect(response.status).toBe(200); // Deterministic fallback still works during a provider outage.
+  expect(effects[0]).toBe("POST /api/threads/thread/runs/run/cancel");
+  await fetch(`${first.base}/webhooks`, webhook("app/uninstalled", shop, {}));
+  await first.close();
+  deletingFails = false;
+  effects.length = 0;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 3600000);
+  try {
+    await start({ ...config, PUBLIC_AI_ENABLED: "false" }, boundary);
+    await vi.waitFor(() => expect(effects).toContain("DELETE /api/assistants/assistant"));
+    expect(effects.indexOf("DELETE /api/threads/thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+  } finally { clock.mockRestore(); }
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+});
+
+it("recovers an uncertain thread creation before erasing the assistant, without sending shopper text", async () => {
+  const effects: string[] = [];
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      effects.push(`${init?.method || "GET"} ${new URL(url).pathname}`);
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (init?.method === "POST" && url.endsWith("/threads")) throw new Error("Response lost after upstream creation");
+      if (url.includes("/assistants/assistant/threads")) return Response.json([{ thread_id: "unknown-thread" }]);
+      throw new Error("Shopper content must not be sent after uncertain creation");
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  expect(effects).toContain("DELETE /api/threads/unknown-thread");
+  expect(effects).not.toContain("POST /api/threads/messages");
+  expect(effects.indexOf("DELETE /api/threads/unknown-thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+});
+
+it.each(["unreviewed", "wrong-thread", "recalled-memory"])("uses a safe response for %s AI configuration or context", async mode => {
+  let messages = 0;
+  const { base } = await start({ ...aiEnv, ...(mode === "unreviewed" ? { BACKBOARD_TERMS_REVIEWED_AT: "" } : {}) }, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") return Response.json({});
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/threads")) return Response.json({ thread_id: "thread" });
+      messages++;
+      return new Response(`data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: mode === "wrong-thread" ? "someone-else" : "thread", assistant_id: "assistant", content: "Private remembered answer", ...(mode === "recalled-memory" ? { retrieved_memories: [{ content: "Another shopper's information" }] } : {}) })}\n\n`);
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  expect(session.aiEnabled).toBe(mode !== "unreviewed");
+  const answer = await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) }).then(r => r.json());
+  expect(answer.reply).toContain("Contact the store");
+  expect(answer.reply).not.toContain("remembered");
+  expect(messages).toBe(mode === "unreviewed" ? 0 : 1);
+});
+
 it("does not let an old uninstall retry disable a fresh installation", async () => {
   const { base } = await start();
   const shop = "first.myshopify.com";

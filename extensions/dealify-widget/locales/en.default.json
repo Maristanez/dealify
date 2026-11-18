@@ -1,5 +1,6 @@
 {
   "dealify": {
+    "ai_notice": "AI chat sends your messages and public product information to Backboard and its model provider. Please avoid personal or payment information. AI answers can be wrong.",
     "open": "Make an offer",
     "title": "Dealify shopkeeper",
     "close": "Close",

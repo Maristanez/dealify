@@ -14,7 +14,7 @@ import { publicConfig } from "./public-config.ts";
 import { randomUUID } from "node:crypto";
 
 
-export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb, accessToken, checkout, durableState } = {}) {
+export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb, accessToken, checkout, durableState, aiClient } = {}) {
 const fetch = fetchImpl;
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://b8wzw0-h3.myshopify.com",
@@ -38,7 +38,7 @@ const elevenLabsApiKey = String(env.ELEVENLABS_API_KEY || "").trim();
 const elevenLabsVoiceId = String(env.ELEVENLABS_VOICE_ID || "tapn1QwocNXk3viVSowa").trim();
 const elevenLabsTtsModel = String(env.ELEVENLABS_TTS_MODEL || "eleven_flash_v2_5").trim();
 const elevenLabsSttModel = String(env.ELEVENLABS_STT_MODEL || "scribe_v2").trim();
-const backboard = env.BACKBOARD_API_KEY
+const backboard = aiClient ?? (env.BACKBOARD_API_KEY
   ? createBackboardShopkeeper({
     apiKey: env.BACKBOARD_API_KEY,
     assistantId: backboardAssistantId,
@@ -50,7 +50,7 @@ const backboard = env.BACKBOARD_API_KEY
     fetchImpl: fetch,
     timeoutMs: Number.isFinite(backboardTimeoutMs) && backboardTimeoutMs > 0 ? backboardTimeoutMs : 6500,
   })
-  : null;
+  : null);
 
 const allowedOrigins = getAllowedOrigins();
 const streamEpoch = randomUUID();
@@ -827,7 +827,7 @@ function ownerProducts(mirror) {
 
 function enrichPublicProduct(product, mirror) {
   if (!product) return null;
-  return findProductFromPayload({ product }, mirror)?.publicProduct || product;
+  return findProductFromPayload({ product }, mirror)?.publicProduct || (env.PUBLIC_APP === "true" ? null : product);
 }
 
 async function makeOfferFromPayload(payload, message) {
@@ -1736,7 +1736,7 @@ function logBackboardRun(kind, trace) {
     model: trace.model,
     ms: trace.ms,
     costUsd: trace.costUsd,
-    threadId: trace.threadId,
+    ...(env.PUBLIC_APP === "true" ? {} : { threadId: trace.threadId }),
     recalledMemory: Boolean(trace.memory),
     files: trace.files || [],
   });
@@ -1765,7 +1765,7 @@ function deterministicReply(context) {
   }
   if (isSizingQuestion(message)) return { reply: sizingReply(context.product, products) };
   if (/\b(shipping|ship|delivery|returns|return|tax|taxes)\b/.test(message)) {
-    return { local: true, reply: "Shopify Checkout shows shipping, taxes, and the final total. The held offer covers the items on the card; I cannot guarantee free shipping or no tax. Contact the store for its returns policy." };
+    return { local: !(env.PUBLIC_APP === "true" && backboard), reply: "Shopify Checkout shows shipping, taxes, and the final total. Contact the store for its shipping and returns policy." };
   }
   return null;
 }

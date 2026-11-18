@@ -355,3 +355,12 @@
 **Evidence:** 629 tests / 60 files pass; server/web TypeScript checks and production Console build pass. Order/reconciliation GraphQL validates against 2026-10 without customer-reading fields. Tests cover issued-versus-paid totals, duplicate delivery, refunds/cancellation, missed updates, redaction/re-import prevention, cross-customer privacy isolation, expiry, uninstall during a shopper request, scope loss and concurrent privacy/checkout.
 
 **Limits:** No live Shopify payment or protected-data approval yet. AI is still disabled while its provider lifecycle is implemented. Real support email, public privacy content, hosting/backup operations and development-store gates remain open. Read-order access covers the latest 60 days; displayed figures intentionally use that retention window. No production release claim.
+
+
+## 2026-11-18 — AI restoration checkpoint
+
+**Changes:** Added opt-in public AI chat with a fresh empty assistant/thread per call, pre-send durable cleanup records, forced memory off and no tools/media/search, generic store-specific public prompts, verified response ownership, and safe fallbacks. Cleanup cancels known unfinished runs and retries deletion across restarts and uninstall. Shopper deletion aborts processing and prevents subsequent calls from the interrupted request. Removed browser-supplied catalog fallback data. Added processing disclosures and public environment documentation. Production activation remains gated on actual provider terms review.
+
+**Evidence:** 637 tests / 60 files pass and affected TypeScript checks pass. Liquid, widget asset and locale validation pass. A real Backboard request with synthetic policy data using the existing account returned a grounded answer in about 2.9 seconds; both resource DELETE requests returned 200 and no jobs remained. Existing Railway access showed the app service offline and an expired trial. The key was transferred privately to an ignored local test environment; no desktop automation permission was required and no production setting was changed.
+
+**Remaining:** Independent checkpoint review, production provider terms, privacy/support pages, deployment/backup readiness, live Shopify install/payment, listing and approval. The user will supply the support email later.

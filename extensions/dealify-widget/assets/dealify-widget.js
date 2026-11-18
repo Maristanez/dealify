@@ -19,6 +19,7 @@
       close.onclick = () => this.close();
       heading.append(close);
       this.messages = node("div", "", { "data-messages": "", role: "log", "aria-live": "polite", "aria-relevant": "additions text" });
+      this.aiNotice = node("p", "", { "data-ai-notice": "", hidden: "" });
       this.offerArea = node("div", "", { "data-offer": "", "aria-live": "polite" });
       this.form = node("form");
       this.variant = node("select", "", { "aria-label": this.t("variant", "Product option"), required: "" });
@@ -32,7 +33,7 @@
       this.form.onsubmit = event => { event.preventDefault(); void this.submit(); };
       this.deleteButton = node("button", this.t("delete", "Delete this conversation"), { type: "button", "data-delete": "", disabled: "" });
       this.deleteButton.onclick = () => void this.deleteSession();
-      this.panel.append(heading, this.messages, this.offerArea, this.form, this.deleteButton);
+      this.panel.append(heading, this.aiNotice, this.messages, this.offerArea, this.form, this.deleteButton);
       if (this.dataset.stylesheet) root.append(node("link", "", { rel: "stylesheet", href: this.dataset.stylesheet }));
       root.append(this.launcher, this.panel);
       this.launcher.onclick = () => void this.open();
@@ -65,7 +66,10 @@
       if (this.dataset.currency && this.dataset.currency !== "CAD") { this.say(this.t("currency", "Offers are available only in CAD. You can shop at the listed prices.")); return; }
       this.loading = true;
       try {
-        this.token = (await this.request("/session")).token;
+        const session = await this.request("/session");
+        this.token = session.token;
+        this.aiNotice.hidden = !session.aiEnabled;
+        this.aiNotice.textContent = session.aiEnabled ? `${this.t("ai_notice", "AI chat sends your messages and public product information to Backboard and its model provider. Please avoid personal or payment information. AI answers can be wrong.")} (${session.aiProvider})` : "";
         const catalog = await this.request("/api/catalog", { handle: this.dataset.handle });
         this.product = catalog.items?.find(item => item.handle === this.dataset.handle);
         this.variant.replaceChildren();
