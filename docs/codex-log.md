@@ -363,4 +363,17 @@
 
 **Evidence:** 637 tests / 60 files pass and affected TypeScript checks pass. Liquid, widget asset and locale validation pass. A real Backboard request with synthetic policy data using the existing account returned a grounded answer in about 2.9 seconds; both resource DELETE requests returned 200 and no jobs remained. Existing Railway access showed the app service offline and an expired trial. The key was transferred privately to an ignored local test environment; no desktop automation permission was required and no production setting was changed.
 
-**Remaining:** Independent checkpoint review, production provider terms, privacy/support pages, deployment/backup readiness, live Shopify install/payment, listing and approval. The user will supply the support email later.
+**Remaining at initial checkpoint:** Production provider terms, privacy/support pages, deployment/backup readiness, live Shopify install/payment, listing and approval. The user will supply the support email later.
+
+**AI review follow-up:** Both review axes confirmed the fixes for per-event retrieval rejection, asynchronous durable deletion (fallback no longer waits for provider cleanup), and definitive creation failures. HTTP regressions reproduced all three issues. A second live synthetic run verified cancellation plus both resource deletions (all HTTP 200), with zero jobs left. Pending erasure counts and aggregate maintenance logging make failures visible.
+
+
+## 2026-11-18 — Public documents and deployment preparation
+
+**Changes:** Added unauthenticated privacy/support draft pages, validated support email, minimal readiness covering Console files and committed encrypted-record storage, draining/idempotent shutdown, a Node 24 Docker recipe, public-entry-point legacy Railway transition, CI application/container checks and a deployment/recovery runbook. Official research records the December 1 config cutoff, backup/volume limits and log-retention uncertainty.
+
+**Evidence:** 643 tests / 60 files and affected TypeScript checks pass. Readiness first reproduced HTTP 404, then passed; additional HTTP checks reject a missing Console build and wrong decryption key. Docker is unavailable locally; container CI evidence is pending. The in-app browser confirms the Railway trial remains expired and service offline, without requesting desktop permissions.
+
+**Limits:** No production mutation or launch claim. Provider/hosting terms, support email, configuration migration, persistence/backup/restore/deletion replay, continuous alerts and live Shopify gates remain open.
+
+**Operations review:** Standards found no actionable violations. Spec found unpublished usage quotas; the support page now reads the same limits as enforcement, including configured daily totals and reset-window semantics. An HTTP regression failed before the disclosure and passes after it.

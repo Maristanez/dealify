@@ -36,6 +36,13 @@ export function createPublicStore({ path, encryptionKey }) {
     return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString("utf8"));
   }
   const store = {
+    check() {
+      // Check existing ciphertext as well as a committed write; a wrong key must not appear ready.
+      decode(database.prepare("SELECT * FROM records LIMIT 1").get());
+      store.set("@health", "probe", "current", { ready: true });
+      if (store.get("@health", "probe")?.ready !== true) throw new Error("Storage check failed");
+      store.remove("@health", "probe", "current");
+    },
     get(shop, kind, id = "current") {
       return decode(database.prepare("SELECT * FROM records WHERE shop=? AND kind=? AND id=? AND (expires IS NULL OR expires>?)").get(shop, kind, id, Date.now()));
     },

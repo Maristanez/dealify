@@ -10,6 +10,7 @@ import { storefrontProxy } from "./storefront-proxy.js";
 import { shopifySessions } from "./infra/shopify-sessions.js";
 import { orderLedger } from "./order-ledger.js";
 import { publicAi } from "./public-ai.js";
+import { publicPages, supportEmail } from "./public-pages.js";
 // Express exposes its CommonJS entry point; share its SDK runtime when injecting transport.
 const { setAbstractFetchFunc } = createRequire(import.meta.url)("@shopify/shopify-api/runtime");
 
@@ -38,6 +39,8 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     sessionStorage: store.sessionStorage,
   });
   const app = express();
+  const webRoot = env.WEB_DIST_PATH || fileURLToPath(new URL("../../web/dist/", import.meta.url));
+  let draining = false;
   const sessions = shopifySessions({ shopify, store });
   const orders = orderLedger({ store, sessions, fetchImpl });
   const ai = publicAi({ store, env, fetchImpl });
@@ -59,6 +62,24 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     response.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     next();
   });
+  app.get("/health", (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    try {
+      if (draining) throw new Error("Draining");
+      if (!readFileSync(`${webRoot}/index.html`, "utf8").includes("<head>")) throw new Error("Console build unavailable");
+      store.check();
+      response.json({ status: "ready" });
+    } catch {
+      response.status(503).json({ status: "unavailable" });
+    }
+  });
+  app.use((_request, response, next) => {
+    if (!draining) return next();
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Retry-After", "30");
+    response.status(503).json({ error: "temporarily_unavailable" });
+  });
+  publicPages(app, { env, ai });
   const webhookTasks = new Map();
   async function processWebhook(shop, work) {
     const previous = webhookTasks.get(shop) || Promise.resolve();
@@ -147,8 +168,8 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     const shop = response.locals.shopify.session.shop;
     response.json({ shop, settings: store.get(shop, "settings") || { shopName: "", policyText: "" }, free: true,
       embedUrl: `https://${shop}/admin/themes/current/editor?context=apps&template=product&activateAppId=${encodeURIComponent(env.SHOPIFY_API_KEY)}/dealify`,
-      supportEmail: env.SUPPORT_EMAIL || null,
-      ai: { enabled: ai.enabled, provider: ai.enabled ? env.BACKBOARD_MODEL_PROVIDER : null },
+      supportEmail: supportEmail(env),
+      ai: { enabled: ai.enabled, provider: ai.enabled ? env.BACKBOARD_MODEL_PROVIDER : null, pendingDeletion: ai.pending(shop) },
     });
   });
   app.get("/api/app/privacy-requests", (_request, response) => response.json({ requests: store.list(response.locals.shopify.session.shop, "privacy-request") }));
@@ -178,7 +199,6 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     request.headers.authorization = runtime.internalToken;
     runtime.server.emit("request", request, response);
   });
-  const webRoot = env.WEB_DIST_PATH || fileURLToPath(new URL("../../web/dist/", import.meta.url));
   app.use("/assets", express.static(`${webRoot}/assets`, { immutable: true, maxAge: "1y", index: false }));
   app.get(["/", "/console", "/console/"], shopify.ensureInstalledOnShop(), (_request, response) => {
     const html = readFileSync(`${webRoot}/index.html`, "utf8");
@@ -193,5 +213,9 @@ export function createPublicApp({ env = process.env, fetchImpl = globalThis.fetc
     const status = error.type === "entity.too.large" ? 413 : error.type === "entity.parse.failed" ? 400 : 503;
     response.status(status).json({ error: status === 503 ? "temporarily_unavailable" : "invalid_request" });
   });
-  return { app, shopify, close: async () => { clearInterval(retention); await retentionRun; await orders.close(); await runtimes.close(); await ai.close(); store.close(); } };
+  let closing;
+  return { app, shopify, drain: () => { draining = true; }, close: () => {
+    draining = true;
+    return closing ||= (async () => { clearInterval(retention); await retentionRun; await orders.close(); await runtimes.close(); await ai.close(); store.close(); })();
+  } };
 }

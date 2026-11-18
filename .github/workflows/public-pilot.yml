@@ -1,0 +1,46 @@
+name: Public pilot checks
+on:
+  pull_request:
+  push:
+    branches: [codex/shopify-public-pilot, main]
+permissions:
+  contents: read
+jobs:
+  application:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm build
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag dealify-pilot .
+      - name: Check public entry point over HTTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name dealify-check --publish 127.0.0.1:3000:3000 --tmpfs /data \
+            --env SHOPIFY_API_KEY=test-key --env SHOPIFY_API_SECRET=test-secret \
+            --env SHOPIFY_APP_URL=https://example.com --env DATABASE_PATH=/data/dealify.sqlite \
+            --env DATA_ENCRYPTION_KEY=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc= \
+            dealify-pilot
+          trap 'docker logs dealify-check; docker rm --force dealify-check' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health; then break; fi
+            sleep 1
+          done
+          test "$(curl --silent http://127.0.0.1:3000/health)" = '{"status":"ready"}'
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/api/app)" = 401
+          curl --fail --silent http://127.0.0.1:3000/privacy > /dev/null
+          curl --fail --silent http://127.0.0.1:3000/support > /dev/null
+          docker stop --time 30 dealify-check
+          test "$(docker inspect --format '{{.State.ExitCode}}' dealify-check)" = 0

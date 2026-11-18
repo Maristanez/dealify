@@ -269,6 +269,10 @@ export function createBackboardShopkeeper(config: BackboardClientConfig): Backbo
         const parsed = await parseEventStream(response.body, managed ? event => {
           if ((event.thread_id && event.thread_id !== managed.threadId) || (event.assistant_id && event.assistant_id !== managed.assistantId)) throw new BackboardError("Unexpected AI conversation context");
           if (typeof event.run_id === "string") managed.recordRun(event.run_id);
+          const retrievals = [event.retrieved_memories, event.retrieved_files, ...(event.type === "memory_retrieved" ? [event.memories] : [])];
+          if (retrievals.some(value => value !== undefined && value !== null && value !== false && value !== "" && !(Array.isArray(value) && value.length === 0))) {
+            throw new BackboardError("Unexpected AI retrieval");
+          }
         } : undefined);
         const terminal = parsed.terminal;
         const threadId = stringValue(terminal.thread_id);

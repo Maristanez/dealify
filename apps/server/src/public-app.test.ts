@@ -62,6 +62,36 @@ const aiEnv = {
   BACKBOARD_TERMS_REVIEWED_AT: "2026-11-18", BACKBOARD_PROVIDER_TERMS_URL: "https://example.com/provider-terms",
 };
 
+it("reports local readiness without contacting providers and refuses traffic while draining", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-health-test-"));
+  writeFileSync(join(directory, "index.html"), "<!doctype html><html><head></head><body>Console</body></html>");
+  const instance = await start({ WEB_DIST_PATH: directory }, async () => { throw new Error("Health must not contact providers"); });
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+  const health = await fetch(`${instance.base}/health`);
+  expect(health.status).toBe(200);
+  expect(health.headers.get("cache-control")).toBe("no-store");
+  expect(await health.json()).toEqual({ status: "ready" });
+  instance.drain();
+  expect((await fetch(`${instance.base}/health`)).status).toBe(503);
+  expect((await fetch(`${instance.base}/api/app`)).status).toBe(503);
+});
+
+it("keeps readiness unavailable when the Console build is missing or persisted credentials cannot be decrypted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dealify-health-test-"));
+  const config = { WEB_DIST_PATH: directory, DATABASE_PATH: join(directory, "app.sqlite") };
+  const first = await start(config);
+  expect((await fetch(`${first.base}/health`)).status).toBe(503);
+  writeFileSync(join(directory, "index.html"), "<!doctype html><html><head></head><body>Console</body></html>");
+  expect((await fetch(`${first.base}/health`)).status).toBe(200);
+  await fetch(`${first.base}/api/app`, { headers: { Authorization: `Bearer ${token("first.myshopify.com")}` } });
+  await first.close();
+  const restarted = await start({ ...config, DATA_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString("base64") });
+  const health = await fetch(`${restarted.base}/health`);
+  expect(health.status).toBe(503);
+  expect(await health.json()).toEqual({ status: "unavailable" });
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+});
+
 it("answers with the current merchant's public policy and deletes isolated AI conversations", async () => {
   const requests: Array<{ url: string; method: string; body: any }> = [];
   let resource = 0;
@@ -178,7 +208,7 @@ it("cancels a timed-out AI run before deletion and retries failed erasure after 
   cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 });
 
-it("recovers an uncertain thread creation before erasing the assistant, without sending shopper text", async () => {
+it.each(["uncertain", "rejected"])("cleans up %s thread creation without sending shopper text", async mode => {
   const effects: string[] = [];
   const { base } = await start(aiEnv, async (input, init) => {
     const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -186,8 +216,11 @@ it("recovers an uncertain thread creation before erasing the assistant, without 
       effects.push(`${init?.method || "GET"} ${new URL(url).pathname}`);
       if (init?.method === "DELETE") return Response.json({});
       if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
-      if (init?.method === "POST" && url.endsWith("/threads")) throw new Error("Response lost after upstream creation");
-      if (url.includes("/assistants/assistant/threads")) return Response.json([{ thread_id: "unknown-thread" }]);
+      if (init?.method === "POST" && url.endsWith("/threads")) {
+        if (mode === "rejected") return new Response("Too many requests", { status: 429 });
+        throw new Error("Response lost after upstream creation");
+      }
+      if (url.includes("/assistants/assistant/threads")) return Response.json(mode === "rejected" ? [] : [{ thread_id: "unknown-thread" }]);
       throw new Error("Shopper content must not be sent after uncertain creation");
     }
     if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
@@ -197,12 +230,15 @@ it("recovers an uncertain thread creation before erasing the assistant, without 
   await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
   const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
   await fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
-  expect(effects).toContain("DELETE /api/threads/unknown-thread");
+  await vi.waitFor(() => expect(effects).toContain("DELETE /api/assistants/assistant"));
   expect(effects).not.toContain("POST /api/threads/messages");
-  expect(effects.indexOf("DELETE /api/threads/unknown-thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+  if (mode === "uncertain") {
+    expect(effects).toContain("DELETE /api/threads/unknown-thread");
+    expect(effects.indexOf("DELETE /api/threads/unknown-thread")).toBeLessThan(effects.indexOf("DELETE /api/assistants/assistant"));
+  }
 });
 
-it.each(["unreviewed", "wrong-thread", "recalled-memory"])("uses a safe response for %s AI configuration or context", async mode => {
+it.each(["unreviewed", "wrong-thread", "recalled-memory", "memory-event"])("uses a safe response for %s AI configuration or context", async mode => {
   let messages = 0;
   const { base } = await start({ ...aiEnv, ...(mode === "unreviewed" ? { BACKBOARD_TERMS_REVIEWED_AT: "" } : {}) }, async (input, init) => {
     const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -211,7 +247,8 @@ it.each(["unreviewed", "wrong-thread", "recalled-memory"])("uses a safe response
       if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
       if (url.endsWith("/threads")) return Response.json({ thread_id: "thread" });
       messages++;
-      return new Response(`data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: mode === "wrong-thread" ? "someone-else" : "thread", assistant_id: "assistant", content: "Private remembered answer", ...(mode === "recalled-memory" ? { retrieved_memories: [{ content: "Another shopper's information" }] } : {}) })}\n\n`);
+      const earlierMemory = mode === "memory-event" ? `data: ${JSON.stringify({ type: "memory_retrieved", memories: [{ content: "Another shopper's information" }] })}\n\n` : "";
+      return new Response(`${earlierMemory}data: ${JSON.stringify({ type: "run_ended", status: "completed", thread_id: mode === "wrong-thread" ? "someone-else" : "thread", assistant_id: "assistant", content: "Private remembered answer", retrieved_memories: mode === "recalled-memory" ? [{ content: "Another shopper's information" }] : [] })}\n\n`);
     }
     if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
     return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
@@ -224,6 +261,31 @@ it.each(["unreviewed", "wrong-thread", "recalled-memory"])("uses a safe response
   expect(answer.reply).toContain("Contact the store");
   expect(answer.reply).not.toContain("remembered");
   expect(messages).toBe(mode === "unreviewed" ? 0 : 1);
+});
+
+it("returns fallback without waiting for provider deletion", async () => {
+  let release!: () => void;
+  const deletion = new Promise<void>(resolve => { release = resolve; });
+  const { base } = await start(aiEnv, async (input, init) => {
+    const url = String(input), body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("backboard.io")) {
+      if (init?.method === "DELETE") { await deletion; return Response.json({}); }
+      if (url.endsWith("/assistants")) return Response.json({ assistant_id: "assistant" });
+      if (url.endsWith("/threads")) return Response.json({ thread_id: "thread" });
+      return new Response("Unavailable", { status: 503 });
+    }
+    if (body.grant_type) return Response.json({ access_token: "offline-token", expires_in: 3600, refresh_token: "refresh-token", refresh_token_expires_in: 7776000, scope: "read_products,read_inventory,write_discounts,read_orders,write_app_proxy" });
+    return Response.json({ data: { shop: { currencyCode: "CAD" }, products: { nodes: [] } } });
+  });
+  const shop = "first.myshopify.com";
+  await fetch(`${base}/api/pause`, { method: "POST", headers: { Authorization: `Bearer ${token(shop)}`, "Content-Type": "application/json" }, body: JSON.stringify({ paused: false }) });
+  const session = await fetch(base + proxy(shop, "session"), { method: "POST" }).then(r => r.json());
+  const answer = fetch(base + proxy(shop, "api/chat"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ shopperToken: session.token, message: "What is your return policy?" }) });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([answer.then(r => r.status), new Promise(resolve => { timer = setTimeout(() => resolve("waiting for deletion"), 250); })]);
+    expect(result).toBe(200);
+  } finally { clearTimeout(timer); release(); await answer; }
 });
 
 it("does not let an old uninstall retry disable a fresh installation", async () => {
@@ -296,6 +358,25 @@ it("loads App Bridge before the embedded Console and restricts framing to Shopif
   expect(html).toContain('<meta name="shopify-api-key" content="test-key">');
   expect(html.indexOf("shopifycloud/app-bridge.js")).toBeLessThan(html.indexOf('type="module"'));
   expect(html).not.toContain("test-secret");
+});
+
+it("serves privacy and support information without requiring a merchant login", async () => {
+  const { base } = await start({ SUPPORT_EMAIL: "help@example.com", PILOT_DAILY_TURNS: "850" });
+  const privacy = await fetch(`${base}/privacy`);
+  expect(privacy.status).toBe(200);
+  const html = await privacy.text();
+  expect(html).toContain("Dealify privacy policy");
+  expect(html).toContain("24 hours");
+  expect(html).toContain("Backboard");
+  expect(html).toContain("help@example.com");
+  expect(html).not.toContain(env.SHOPIFY_API_SECRET);
+  const support = await fetch(`${base}/support`);
+  expect(support.status).toBe(200);
+  const help = await support.text();
+  expect(help).toContain("Enable the app embed");
+  expect(help).toContain("850 messages per store per 24-hour window");
+  expect(help).toContain("30 messages per shopper session per hour");
+  expect(help).toContain("Windows begin with the first counted action");
 });
 
 it("uses the verified Shopify shop and isolates merchant settings", async () => {

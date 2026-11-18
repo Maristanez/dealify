@@ -1,0 +1,13 @@
+.git
+.shopify
+**/node_modules
+**/dist
+**/target
+**/.env
+**/.env.*
+**/*.sqlite*
+**/*.log
+**/*.pem
+**/*.key
+work
+outputs
