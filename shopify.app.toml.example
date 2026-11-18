@@ -1,0 +1,31 @@
+# Generate shopify.app.toml with `pnpm configure:shopify` after registering the app.
+client_id = "REPLACE_WITH_REGISTERED_CLIENT_ID"
+name = "Dealify"
+application_url = "https://REPLACE_WITH_APP_HOST"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[access_scopes]
+scopes = "read_products,read_inventory,write_discounts,read_orders,write_app_proxy"
+use_legacy_install_flow = false
+
+[auth]
+redirect_urls = ["https://REPLACE_WITH_APP_HOST/auth/callback"]
+
+[webhooks]
+api_version = "2026-10"
+
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled", "app/scopes_update", "orders/paid", "orders/cancelled", "refunds/create"]
+uri = "/webhooks"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+uri = "/webhooks"
+
+[app_proxy]
+url = "/proxy"
+subpath = "dealify"
+prefix = "apps"

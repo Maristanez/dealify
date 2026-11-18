@@ -1,5 +1,7 @@
 # The Bazaar — The Plan (and the tracker)
 
+**Public-app work (November 2026):** Follow [PUBLIC-APP-PLAN.md](PUBLIC-APP-PLAN.md) for the user-authorized free pilot and Shopify approval gates. The historical hackathon status below is not evidence of public-app launch readiness.
+
 **Hack the North 2026 · team of 3 · code window Sat 19 Sep 00:00 → Sun 20 Sep 08:00 EDT (32 h)**
 
 ## STATUS BOARD

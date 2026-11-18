@@ -14,7 +14,7 @@ import { publicConfig } from "./public-config.ts";
 import { randomUUID } from "node:crypto";
 
 
-export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb } = {}) {
+export async function createBazaarServer({ env = process.env, fetchImpl = globalThis.fetch, ownerDb, accessToken } = {}) {
 const fetch = fetchImpl;
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://b8wzw0-h3.myshopify.com",
@@ -418,6 +418,7 @@ const server = createServer(async (request, response) => {
 
 
 function loadSeedProducts() {
+  if (env.PUBLIC_APP === "true") return [];
   const candidates = [
     resolve(process.cwd(), "infra/seed/products.json"),
     resolve(dirname(fileURLToPath(import.meta.url)), "../../../infra/seed/products.json"),
@@ -458,6 +459,7 @@ function sendJson(response, request, status, body) {
 }
 
 function readJson(request) {
+  if (request.bazaarPayload) return Promise.resolve(request.bazaarPayload);
   return new Promise((resolveJson, reject) => {
     let body = "";
     request.setEncoding("utf8");
@@ -499,7 +501,7 @@ function audioExtension(mimeType) {
 }
 
 function hasShopifyCredentials() {
-  return Boolean(shopName() && ((env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET) || env.SHOPIFY_ADMIN_ACCESS_TOKEN));
+  return Boolean(shopName() && (accessToken || (env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET) || env.SHOPIFY_ADMIN_ACCESS_TOKEN));
 }
 
 function shopName() {
@@ -541,8 +543,30 @@ async function syncMirror({ force = false } = {}) {
     state.mirror = seedMirror("Shopify credentials are not configured; using seed catalog.");
     return state.mirror;
   }
-  const data = await shopifyGraphql(PRODUCTS_QUERY, {});
-  const products = data.products.nodes.map(mapShopifyProduct).filter(Boolean);
+  const nodes = [];
+  const cursors = new Set();
+  let after = null;
+  do {
+    const data = await shopifyGraphql(PRODUCTS_QUERY, { after });
+    nodes.push(...data.products.nodes);
+    if (!data.products.pageInfo?.hasNextPage) break;
+    after = data.products.pageInfo.endCursor;
+    if (!after || cursors.has(after) || nodes.length >= 25000) throw new Error("The catalog could not be loaded completely. Please contact support.");
+    cursors.add(after);
+  } while (after);
+  for (const product of nodes) {
+    const seen = new Set();
+    while (product.variants?.pageInfo?.hasNextPage) {
+      const after = product.variants.pageInfo.endCursor;
+      if (!after || seen.has(after) || product.variants.nodes.length >= 2048) throw new Error("Product variants could not be loaded completely.");
+      seen.add(after);
+      const data = await shopifyGraphql(VARIANTS_QUERY, { id: product.id, after });
+      if (!data.product) throw new Error("A product changed during catalog synchronization. Please retry.");
+      product.variants.nodes.push(...data.product.variants.nodes);
+      product.variants.pageInfo = data.product.variants.pageInfo;
+    }
+  }
+  const products = nodes.map(mapShopifyProduct).filter(Boolean);
   const items = products.flatMap((product) => product.variants.map((variant) => ({
     variantId: variant.gid,
     variantNumericId: variant.numericId,
@@ -569,16 +593,18 @@ async function syncMirror({ force = false } = {}) {
 }
 
 const PRODUCTS_QUERY = `#graphql
-  query BazaarProducts {
-    products(first: 50, query: "status:active") {
+  query BazaarProducts($after: String) {
+    products(first: 50, after: $after, query: "status:active") {
+      pageInfo { hasNextPage endCursor }
       nodes {
         id
         title
         handle
         productType
-        featuredImage { url }
+        featuredMedia { preview { image { url } } }
         metafield(namespace: "bazaar", key: "stocked_at") { value }
         variants(first: 50) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             title
@@ -590,6 +616,20 @@ const PRODUCTS_QUERY = `#graphql
               unitCost { amount currencyCode }
             }
           }
+        }
+      }
+    }
+  }
+`;
+
+const VARIANTS_QUERY = `#graphql
+  query BazaarVariants($id: ID!, $after: String) {
+    product(id: $id) {
+      variants(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id title sku price inventoryQuantity
+          inventoryItem { tracked unitCost { amount currencyCode } }
         }
       }
     }
@@ -619,7 +659,7 @@ function mapShopifyProduct(product) {
     handle: product.handle,
     title: product.title,
     productType: product.productType || seed?.productType || "",
-    image: product.featuredImage?.url || "",
+    image: product.featuredMedia?.preview?.image?.url || product.featuredImage?.url || "",
     stockedAt: product.metafield?.value || seed?.stockedAt || null,
     variants,
   };
@@ -667,6 +707,7 @@ function seedMirror(reason) {
 }
 
 async function getShopifyToken({ force = false } = {}) {
+  if (accessToken) return accessToken({ force });
   if (!force && state.token && Date.now() < state.tokenExpiresAt - 60_000) return state.token;
   if (env.SHOPIFY_ADMIN_ACCESS_TOKEN) {
     state.token = env.SHOPIFY_ADMIN_ACCESS_TOKEN;

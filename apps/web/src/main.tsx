@@ -4,7 +4,9 @@ import { ConsoleApp } from "./console/ConsoleApp";
 import { createRuntime } from "./console/data/runtime";
 import "./console/styles.css";
 const root = createRoot(document.getElementById("root")!);
-if (location.pathname === "/console" || location.pathname === "/console/") {
+if (document.querySelector('meta[name="shopify-api-key"]')) {
+  void import("./console/EmbeddedApp").then(({ EmbeddedApp }) => root.render(<EmbeddedApp />));
+} else if (location.pathname === "/console" || location.pathname === "/console/") {
   void createRuntime(import.meta.env).then(runtime => root.render(<>
     {runtime.fixture && <p className="fixture-notice">Fixture preview · Changes stay in this browser session.</p>}
     <ConsoleApp {...runtime} />

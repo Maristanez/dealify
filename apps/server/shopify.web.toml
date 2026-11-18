@@ -1,0 +1,6 @@
+name = "Dealify server and merchant Console"
+roles = ["frontend", "backend"]
+webhooks_path = "/webhooks"
+
+[commands]
+dev = "node --env-file-if-exists=../../.env src/public-index.js"
